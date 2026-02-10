@@ -8,6 +8,7 @@ wheels/
 .idea/
 datas/
 result/
+results/
 
 # Virtual environments
 .venv
