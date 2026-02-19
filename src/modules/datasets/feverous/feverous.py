@@ -1,10 +1,11 @@
+from collections import defaultdict
 from typing import Optional
 
 from .utils.annotation_processor import AnnotationProcessor
 from .utils.wiki_page import WikiPage
 from .database.feverous_db import FeverousDB
 from ..base import Dataset
-
+from .utils import normalize_feverous_label
 
 class Feverous(Dataset):
     def __init__(self,
@@ -17,11 +18,9 @@ class Feverous(Dataset):
 
     @classmethod
     def from_path(cls, dataset_path: str, db_path: Optional[str] = None):
+        assert db_path is not None, "db_path must be provided for FEVEROUS dataset"  
         anno_processor = AnnotationProcessor(dataset_path)
-
-        wiki_db = None
-        if db_path:
-            wiki_db = FeverousDB(db_path)
+        wiki_db = FeverousDB(db_path)
 
         return cls(anno_processor, wiki_db, claims=None)
 
@@ -34,7 +33,7 @@ class Feverous(Dataset):
 
             try:
                 challenge = annotation.get_challenge()
-                label = annotation.get_verdict()
+                label = normalize_feverous_label(annotation.get_verdict())
                 context_dicts = annotation.get_context(flat=True)
                 evidences = annotation.get_evidence(flat=True)
 
@@ -48,6 +47,9 @@ class Feverous(Dataset):
                     page_json = self.wiki_db.get_doc_json(wiki_doc)
                     wiki_page = WikiPage(wiki_doc, page_json)
 
+                    # sentence: handled implicitly via get_element_by_id (sentence in page_items)
+                    # title: explicit handling needed (title not in page_items)
+                    # cell/header_cell, item, table_caption: need specialized getters
                     content = wiki_page.get_element_by_id(evidence_id)
                     if "title" in evidence_id:
                         content = "Title: " + wiki_page.get_title_content()
@@ -56,7 +58,9 @@ class Feverous(Dataset):
                     elif "item" in evidence_id:
                         content = "Item: " + wiki_page.get_item_by_id(evidence_id)
                     elif "table_caption" in evidence_id:
-                        pass # TODO: Implement
+                        content = "Table caption: " + str(
+                            wiki_page.get_caption_content(evidence_id) or ""
+                        )
                     evidence_str += f"- Evidence {i+1}: {str(content)}\n"
 
                 for i, (evidence_context, contexts) in enumerate(context_dicts.items()):
@@ -67,6 +71,7 @@ class Feverous(Dataset):
                         page_json = self.wiki_db.get_doc_json(wiki_doc)
                         wiki_page = WikiPage(wiki_doc, page_json)
 
+                        # Same evidence-type handling as above (sentence implicit, title/cell/item/table_caption explicit)
                         content = wiki_page.get_element_by_id(context_id)
                         if "title" in context_id:
                             content = "Title: " + wiki_page.get_title_content()
@@ -75,7 +80,9 @@ class Feverous(Dataset):
                         elif "item" in context_id:
                             content = "Item: " + wiki_page.get_item_by_id(context_id)
                         elif "table_caption" in context_id:
-                            pass # TODO: Implement
+                            content = "Table caption: " + str(
+                                wiki_page.get_caption_content(context_id) or ""
+                            )
                         context_str += f"- Context {i+1}_{j+1}: {str(content)}\n"
 
                 context = context_str
@@ -83,7 +90,6 @@ class Feverous(Dataset):
 
             except:
                 challenge = None
-                label = None
                 context = None
                 evidence = None
 
