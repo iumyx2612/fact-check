@@ -45,7 +45,9 @@ class AnnotationProcessor:
                         print("No gold evidence found in the input.")
                 try:
                     yield Annotation(line, self.with_content)
-                except:
+                except GeneratorExit:
+                    raise
+                except Exception:
                     traceback.print_exc()
                     print("Error while processing Annotation {}".format(line["id"]))
                     continue
