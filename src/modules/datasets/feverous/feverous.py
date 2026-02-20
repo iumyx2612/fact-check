@@ -18,9 +18,11 @@ class Feverous(Dataset):
 
     @classmethod
     def from_path(cls, dataset_path: str, db_path: Optional[str] = None):
-        assert db_path is not None, "db_path must be provided for FEVEROUS dataset"  
         anno_processor = AnnotationProcessor(dataset_path)
-        wiki_db = FeverousDB(db_path)
+
+        wiki_db = None
+        if db_path:
+            wiki_db = FeverousDB(db_path)
 
         return cls(anno_processor, wiki_db, claims=None)
 
@@ -90,6 +92,7 @@ class Feverous(Dataset):
 
             except:
                 challenge = None
+                label = None
                 context = None
                 evidence = None
 
