@@ -1,4 +1,3 @@
-from collections import defaultdict
 from typing import Optional
 
 from .utils.annotation_processor import AnnotationProcessor
@@ -6,6 +5,7 @@ from .utils.wiki_page import WikiPage
 from .database.feverous_db import FeverousDB
 from ..base import Dataset
 from .utils import normalize_feverous_label
+from .utils.feveous_utils import wiki_table_to_md, wiki_to_plain_text
 
 class Feverous(Dataset):
     def __init__(self,
@@ -63,7 +63,7 @@ class Feverous(Dataset):
                         content = "Table caption: " + str(
                             wiki_page.get_caption_content(evidence_id) or ""
                         )
-                    evidence_str += f"- Evidence {i+1}: {str(content)}\n"
+                    evidence_str += f"- Evidence {i+1}: {wiki_to_plain_text(str(content))}\n"
 
                 for i, (evidence_context, contexts) in enumerate(context_dicts.items()):
                     for j, context in enumerate(contexts):
@@ -73,19 +73,17 @@ class Feverous(Dataset):
                         page_json = self.wiki_db.get_doc_json(wiki_doc)
                         wiki_page = WikiPage(wiki_doc, page_json)
 
-                        # Same evidence-type handling as above (sentence implicit, title/cell/item/table_caption explicit)
+                        # Same evidence-type handling as above (sentence implicit, title/cell/item explicit)
                         content = wiki_page.get_element_by_id(context_id)
                         if "title" in context_id:
                             content = "Title: " + wiki_page.get_title_content()
                         elif "cell" in context_id:
-                            content = "Cell: " + wiki_page.get_cell_content(context_id)
+                            table = wiki_page.get_table_from_cell_id(context_id)
+                            content = "Table:\n" + wiki_table_to_md(str(table))
                         elif "item" in context_id:
                             content = "Item: " + wiki_page.get_item_by_id(context_id)
-                        elif "table_caption" in context_id:
-                            content = "Table caption: " + str(
-                                wiki_page.get_caption_content(context_id) or ""
-                            )
-                        context_str += f"- Context {i+1}_{j+1}: {str(content)}\n"
+
+                        context_str += f"- Context {i+1}_{j+1}: {wiki_to_plain_text(str(content))}\n"
 
                 context = context_str
                 evidence = evidence_str

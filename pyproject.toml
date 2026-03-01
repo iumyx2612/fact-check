@@ -8,5 +8,7 @@ dependencies = [
     "datasets>=4.5.0",
     "jsonlines>=4.0.0",
     "llama-index>=0.14.13",
+    "llama-index-retrievers-bm25>=0.6.5",
+    "llama-index-vector-stores-milvus>=1.0.0",
     "scikit-learn>=1.8.0",
 ]
