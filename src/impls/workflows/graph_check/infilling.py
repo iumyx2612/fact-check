@@ -25,7 +25,8 @@ from ...events.graph_check.infilling import (
 from ...events.graph_check.context import SynthesisContext
 
 
-def build_retriever(document_path: str) -> BM25Retriever:
+def build_feverous_retriever(document_path: str, similarity_top_k: int = 10) -> BM25Retriever:
+    """Build a BM25 retriever for Feverous dataset."""
     db = FeverousDB(document_path)
     doc_ids = db.get_doc_ids()
 
@@ -37,9 +38,15 @@ def build_retriever(document_path: str) -> BM25Retriever:
         documents.append(document)
 
     index = SummaryIndex(nodes=documents)
-    retriever = BM25Retriever.from_defaults(index, similarity_top_k=10)
+    retriever = BM25Retriever.from_defaults(index, similarity_top_k=similarity_top_k)
 
     return retriever
+
+
+def build_exfever_retriever(db_path: str, similarity_top_k: int = 10) -> BM25Retriever:
+    """Build a BM25 retriever for ExFever dataset."""
+    from src.modules.retrievers.exfever import build_exfever_retriever as build_retriever
+    return build_retriever(db_path, similarity_top_k)
 
 
 class InfillingWorkflow(Workflow):
@@ -47,31 +54,48 @@ class InfillingWorkflow(Workflow):
                  llm: LLM,
                  retriever: Optional[BaseRetriever] = None,
                  document_path: str = None,
+                 dataset_type: str = "feverous",
+                 similarity_top_k: int = 10,
                  **kwargs):
+        """
+        Initialize infilling workflow.
+        
+        Args:
+            llm: Language model for entity infilling
+            retriever: Pre-built retriever (optional)
+            document_path: Path to wiki database
+            dataset_type: "feverous" or "exfever"
+            similarity_top_k: Number of documents to retrieve
+        """
         super().__init__(**kwargs)
         self.llm = llm
-        if sum(bool(val) for val in [document_path, retriever]) != 1:
-            raise ValueError("Please pass exactly one of document_path or retriever.")
-
-        if document_path:
-            retriever = build_retriever(document_path)
-
-        self.retriever = retriever
+        
+        if retriever is not None:
+            self.retriever = retriever
+        elif document_path is not None:
+            if dataset_type == "exfever":
+                self.retriever = build_exfever_retriever(document_path, similarity_top_k)
+            else:
+                self.retriever = build_feverous_retriever(document_path, similarity_top_k)
+        else:
+            raise ValueError("Either retriever or document_path must be provided")
 
     @step
     async def initialize(
             self, ctx: Context[SynthesisContext], ev: InfillingStartEvent
     ) -> InfillingLoopInitialize:
         path = ev.path
-        graph: Graph = await ctx.store.get("graph")
+        graph = ev.graph
 
         infilled_def_triple_texts = [def_triple.triplet_text for def_triple in graph.def_triples]
-        infilled_triple_texts = [triple.triplet_text for triple in graph.triples]
+        infilled_triplets_texts = [triple.triplet_text for triple in graph.triples]
 
         async with ctx.store.edit_state() as ctx_state:
             ctx_state.infilled_def_triplets_texts = infilled_def_triple_texts
-            ctx_state.infilled_triple_texts = infilled_triple_texts
+            ctx_state.infilled_triplets_texts = infilled_triplets_texts
             ctx_state.path = path
+            ctx_state.graph = graph
+            ctx_state.claim = ev.claim
 
         return InfillingLoopInitialize()
 
@@ -222,7 +246,7 @@ class InfillingWorkflow(Workflow):
         if answer.lower().startswith("blank is "):
             answer = answer[len("blank is "):]
 
-        return HandleLoopInfo(infill=answer, qeury=query)
+        return HandleLoopInfo(infill=answer, query=query)
 
     @step
     async def handle_loop_info(

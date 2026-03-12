@@ -12,3 +12,9 @@ result/
 # Virtual environments
 .venv
 .env
+
+
+tests/
+docs/
+uv.lock
+*.log

@@ -8,6 +8,7 @@ from src.modules.schema.graph_check.graph import Graph
 class InfillingStartEvent(StartEvent):
     claim: str
     path: list[str]
+    graph: Graph
 
 
 class InfillingLoopInitialize(Event):
