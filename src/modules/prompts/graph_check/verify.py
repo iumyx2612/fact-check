@@ -32,3 +32,37 @@ Based on the retrieved evidence, determine if it:
 
 Provide your answer as a single word: SUPPORT, REFUTE, or NOT ENOUGH INFORMATION
 """
+
+# Binary classification prompts (matching original GraphCheck)
+BINARY_VERIFY_TRIPLE_USER = """
+Given a claim and supporting evidence, determine whether the evidence supports or refutes the claim.
+
+Claim: {claim}
+
+Evidence:
+{evidence}
+
+Based only on the evidence provided above, determine if the evidence:
+- Supports the claim (the evidence confirms the claim is true)
+- Refutes the claim (the evidence contradicts the claim or shows it is false)
+
+Provide your answer as a single word: true or false
+"""
+
+BINARY_VERIFY_TRIPLE_WITH_CONTEXT_USER = """
+Given a claim and supporting evidence, determine whether the evidence supports or refutes the claim.
+
+Claim: {claim}
+
+Gold Evidence (for reference):
+{gold_evidence}
+
+Retrieved Evidence:
+{retrieved_evidence}
+
+Based on the retrieved evidence, determine if it:
+- Supports the claim (the evidence confirms the claim is true)
+- Refutes the claim (the evidence contradicts the claim or shows it is false)
+
+Provide your answer as a single word: true or false
+"""

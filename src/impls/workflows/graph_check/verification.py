@@ -8,7 +8,12 @@ from llama_index.core.prompts import ChatMessage
 from llama_index.core.retrievers import BaseRetriever
 
 from src.modules.schema.graph_check.graph import Graph
-from src.modules.prompts.graph_check.verify import VERIFY_TRIPLE_USER, VERIFY_TRIPLE_WITH_CONTEXT_USER
+from src.modules.prompts.graph_check.verify import (
+    VERIFY_TRIPLE_USER,
+    VERIFY_TRIPLE_WITH_CONTEXT_USER,
+    BINARY_VERIFY_TRIPLE_USER,
+    BINARY_VERIFY_TRIPLE_WITH_CONTEXT_USER
+)
 from src.impls.events.graph_check.verification import (
     VerificationStartEvent,
     VerificationLoopInitialize,
@@ -38,15 +43,16 @@ class VerificationWorkflow(Workflow):
     """
 
     def __init__(self,
-                  llm: LLM,
-                  retriever: Optional[BaseRetriever] = None,
-                  db_path: Optional[str] = None,
-                  similarity_top_k: int = 10,
-                  document_level: str = "concat+each",
-                  dataset_type: Optional[str] = None,
-                  parallel_verification: bool = True,
-                  max_concurrent_verifications: int = 5,
-                  **kwargs):
+                   llm: LLM,
+                   retriever: Optional[BaseRetriever] = None,
+                   db_path: Optional[str] = None,
+                   similarity_top_k: int = 10,
+                   document_level: str = "concat+each",
+                   classification_mode: str = "three_way",
+                   dataset_type: Optional[str] = None,
+                   parallel_verification: bool = True,
+                   max_concurrent_verifications: int = 5,
+                   **kwargs):
         """
         Initialize verification workflow.
 
@@ -56,6 +62,7 @@ class VerificationWorkflow(Workflow):
             db_path: Path to ExFever wiki_db (used if retriever not provided)
             similarity_top_k: Number of documents to retrieve
             document_level: Verification mode - "concat", "each", or "concat+each"
+            classification_mode: Classification mode - "three_way" or "binary"
             dataset_type: Dataset type (unused, kept for compatibility)
             parallel_verification: Whether to verify triples in parallel
             max_concurrent_verifications: Maximum concurrent verifications when parallel=True
@@ -63,6 +70,7 @@ class VerificationWorkflow(Workflow):
         super().__init__(**kwargs)
         self.llm = llm
         self.document_level = document_level
+        self.classification_mode = classification_mode
         self.parallel_verification = parallel_verification
         self.max_concurrent_verifications = max_concurrent_verifications
 
@@ -258,7 +266,7 @@ class VerificationWorkflow(Workflow):
         """
         Use LLM to verify a claim against evidence.
 
-        Returns: "SUPPORTED", "REFUTE", or "NOT ENOUGH INFORMATION"
+        Returns: "SUPPORTED" or "NOT_SUPPORTED"
         """
         # Truncate evidence if too long (similar to original truncate method)
         max_evidence_len = 40000
@@ -266,31 +274,50 @@ class VerificationWorkflow(Workflow):
             evidence = evidence[:max_evidence_len]
             logger.warning(f"Evidence truncated to {max_evidence_len} characters")
 
-        # Prepare prompt
-        if gold_evidence:
-            prompt_content = VERIFY_TRIPLE_WITH_CONTEXT_USER.format(
-                claim=claim,
-                gold_evidence=gold_evidence,
-                retrieved_evidence=evidence
-            )
-        else:
-            prompt_content = VERIFY_TRIPLE_USER.format(
-                claim=claim,
-                evidence=evidence
-            )
+        # Prepare prompt based on classification mode
+        if self.classification_mode == "binary":
+            if gold_evidence:
+                prompt_content = BINARY_VERIFY_TRIPLE_WITH_CONTEXT_USER.format(
+                    claim=claim,
+                    gold_evidence=gold_evidence,
+                    retrieved_evidence=evidence
+                )
+            else:
+                prompt_content = BINARY_VERIFY_TRIPLE_USER.format(
+                    claim=claim,
+                    evidence=evidence
+                )
+        else:  # three_way (default)
+            if gold_evidence:
+                prompt_content = VERIFY_TRIPLE_WITH_CONTEXT_USER.format(
+                    claim=claim,
+                    gold_evidence=gold_evidence,
+                    retrieved_evidence=evidence
+                )
+            else:
+                prompt_content = VERIFY_TRIPLE_USER.format(
+                    claim=claim,
+                    evidence=evidence
+                )
 
         prompt = ChatMessage(content=prompt_content, role="user")
         response = await self.llm.achat([prompt])
         content = response.message.content
         answer = content.strip().upper() if content else ""
 
-        # Parse the answer
-        if "SUPPORT" in answer and "NOT ENOUGH INFORMATION" not in answer:
-            return "SUPPORTED"
-        elif "REFUTE" in answer:
-            return "NOT_SUPPORTED"  # In graphcheck, refuted triples count as NOT_SUPPORTED
-        else:
-            return "NOT_SUPPORTED"  # Treat "NOT ENOUGH INFORMATION" as NOT_SUPPORTED for graphcheck
+        # Parse the answer based on classification mode
+        if self.classification_mode == "binary":
+            if "TRUE" in answer:
+                return "SUPPORTED"
+            else:
+                return "NOT_SUPPORTED"  # Default to NOT_SUPPORTED for uncertain responses
+        else:  # three_way
+            if "SUPPORT" in answer and "NOT ENOUGH INFORMATION" not in answer:
+                return "SUPPORTED"
+            elif "REFUTE" in answer:
+                return "NOT_SUPPORTED"  # In graphcheck, refuted triples count as NOT_SUPPORTED
+            else:
+                return "NOT_SUPPORTED"  # Treat "NOT ENOUGH INFORMATION" as NOT_SUPPORTED for graphcheck
 
     async def _verify_concat(
             self,
