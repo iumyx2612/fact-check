@@ -19,4 +19,3 @@ docs/
 uv.lock
 *.log
 cache/*
-indexing_checkpoint.db
