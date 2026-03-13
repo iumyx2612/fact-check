@@ -270,12 +270,11 @@ class InfillingWorkflow(Workflow):
         infilled_triplets_texts = [
             text.replace(current_latent_entity, answer) for text in infilled_triplets_texts
         ]
-        remained_def_triplet_texts = [
-            text for text in infilled_def_triplets_texts if re.search(r"\(ENT\d+\)", text.split()[0])
-        ]
 
-        if remained_def_triplet_texts:
-            graph = Graph(remained_def_triplet_texts, infilled_triplets_texts)
+        # Always reconstruct graph with all updated triplets (fix for bug where graph wasn't
+        # reconstructed when remained_def_triplet_texts was empty, causing latent entities
+        # to remain unfilled in the final graph passed to verification)
+        graph = Graph(infilled_def_triplets_texts, infilled_triplets_texts)
         infilling_log = {
             "infilling_index": index,
             "target_latent_entity": current_latent_entity,

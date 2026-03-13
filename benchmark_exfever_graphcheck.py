@@ -12,6 +12,7 @@ Run with:
 """
 import os
 import asyncio
+import json
 from typing import List
 from dotenv import load_dotenv
 from tqdm import tqdm
@@ -42,7 +43,7 @@ logging.getLogger("llama_index").setLevel(logging.DEBUG)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
 
-load_dotenv()
+load_dotenv('.env')
 
 
 EXFEVER_DATA_PATH = "datas/ex-fever/dev.csv"
@@ -66,6 +67,36 @@ def normalize_prediction(prediction: str) -> str:
         "NOT_ENOUGH_INFORMATION": "NEI"
     }
     return prediction_mapping.get(prediction, prediction)
+
+
+def serialize_verification_results(verification_results):
+    """Serialize verification results for CSV storage."""
+    if not verification_results:
+        return "[]"
+    
+    # Create a simplified version for CSV
+    simplified_results = []
+    for result in verification_results:
+        simplified_result = {
+            "triple": result.get("triple", ""),
+            "prediction": result.get("prediction", ""),
+            "evidence_length": len(result.get("retrieved_evidence", ""))
+        }
+        simplified_results.append(simplified_result)
+    
+    return json.dumps(simplified_results)
+
+
+def extract_graph_info(graph_obj):
+    """Extract key information from graph object for CSV storage."""
+    if not graph_obj:
+        return {}
+    
+    return {
+        "num_latent_entities": getattr(graph_obj, 'num_la_ent', 0),
+        "num_triples": len(getattr(graph_obj, 'total_triples', [])),
+        "has_latent_entities": getattr(graph_obj, 'num_la_ent', 0) > 0
+    }
 
 
 async def run_graphcheck_for_sample(
@@ -112,6 +143,7 @@ async def _run_graphcheck_for_sample_impl(
         total_llm_calls += 1
 
         graph_obj = graph_result.graph if hasattr(graph_result, 'graph') else graph_result
+        graph_info = extract_graph_info(graph_obj)
         logger.debug(f"Graph constructed with {graph_obj.num_la_ent} latent entities, {len(graph_obj.total_triples)} triples")
 
         if graph_obj.num_la_ent == 0:
@@ -132,7 +164,12 @@ async def _run_graphcheck_for_sample_impl(
             return {
                 "prediction": normalized_pred,
                 "verification_results": result.verification_results,
-                "graph": graph_obj
+                "graph_info": graph_info,
+                "construction_time": construct_time,
+                "total_llm_calls": total_llm_calls,
+                "elapsed_time": elapsed,
+                "paths_tried": 0,
+                "successful_path_index": -1  # No path tried since no latent entities
             }
 
         # Path Generation
@@ -188,8 +225,15 @@ async def _run_graphcheck_for_sample_impl(
                 return {
                     "prediction": normalized_pred,
                     "verification_results": result.verification_results,
-                    "path": path,
-                    "graph": infilled_graph
+                    "graph_info": extract_graph_info(infilled_graph),
+                    "construction_time": construct_time,
+                    "infilling_time": infilling_time,
+                    "verification_time": verification_time,
+                    "total_llm_calls": total_llm_calls,
+                    "elapsed_time": elapsed,
+                    "paths_tried": path_idx + 1,
+                    "successful_path_index": path_idx,
+                    "path_taken": path
                 }
 
         # All paths failed
@@ -200,9 +244,13 @@ async def _run_graphcheck_for_sample_impl(
                    f"Time: {elapsed:.1f}s")
         return {
             "prediction": normalized_pred,
-            "verification_results": [],
-            "paths_tried": paths,
-            "graph": graph_obj
+            "verification_results": [],  # No successful verification results
+            "graph_info": graph_info,
+            "construction_time": construct_time,
+            "total_llm_calls": total_llm_calls,
+            "elapsed_time": elapsed,
+            "paths_tried": len(paths),
+            "successful_path_index": -1  # No successful path
         }
 
     except Exception as e:
@@ -210,7 +258,8 @@ async def _run_graphcheck_for_sample_impl(
         logger.error(f"Error processing claim '{claim[:50]}...': {e} | Time: {elapsed:.1f}s", exc_info=True)
         return {
             "prediction": "REFUTE",
-            "error": str(e)
+            "error": str(e),
+            "elapsed_time": elapsed
         }
 
 
@@ -285,14 +334,30 @@ async def benchmark(
         )
 
         prediction = result.get("prediction", "NOT_SUPPORTED")
-
-        return {
+        
+        # Create detailed result dictionary for CSV
+        detailed_result = {
             "claim": claim,
             "explanation": explanation,
             "label": label,
             "pred": prediction,
-            "is_correct": prediction == label
+            "is_correct": prediction == label,
+            # Additional GraphCheck flow information
+            "graph_num_latent_entities": result.get("graph_info", {}).get("num_latent_entities", 0),
+            "graph_num_triples": result.get("graph_info", {}).get("num_triples", 0),
+            "construction_time": result.get("construction_time", 0),
+            "infilling_time": result.get("infilling_time", 0),
+            "verification_time": result.get("verification_time", 0),
+            "total_llm_calls": result.get("total_llm_calls", 0),
+            "elapsed_time": result.get("elapsed_time", 0),
+            "paths_tried": result.get("paths_tried", 0),
+            "successful_path_index": result.get("successful_path_index", -1),
+            "verification_results": serialize_verification_results(result.get("verification_results", [])),
+            "path_taken": json.dumps(result.get("path_taken", [])) if result.get("path_taken") else "[]",
+            "error": result.get("error", "")
         }
+
+        return detailed_result
 
     # Run all samples in parallel with semaphore limiting concurrency
     start_time = time.time()
