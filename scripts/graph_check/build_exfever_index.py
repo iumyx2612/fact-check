@@ -226,13 +226,20 @@ def adjust_batch_size(current_memory_mb: float, base_batch_size: int) -> int:
         return base_batch_size
 
 
-def main(overwrite: bool = True):
-    """Build and persist BM25 retriever for EX-FEVER dataset with resume capability."""
+def main(overwrite: bool = True, bm25_k1: float = 0.9, bm25_b: float = 0.4):
+    """Build and persist BM25 retriever for EX-FEVER dataset with resume capability.
+
+    Args:
+        overwrite: Whether to overwrite existing collection
+        bm25_k1: BM25 k1 parameter (default: 0.9 to match GraphCheck)
+        bm25_b: BM25 b parameter (default: 0.4 to match GraphCheck)
+    """
     print(f"Starting EX-FEVER indexing (overwrite={overwrite})...")
-    
+    print(f"Using BM25 parameters: k1={bm25_k1}, b={bm25_b}")
+
     # Initialize checkpoint database
     checkpoint_conn = init_checkpoint_db(overwrite=overwrite)
-    
+
     # Resolve DB paths relative to project root so the script is cwd-independent.
     db_paths = [str(PROJECT_ROOT / p) for p in EXFEVER_DB_PATHS]
 
@@ -240,11 +247,11 @@ def main(overwrite: bool = True):
     doc_pairs = iter_unique_doc_ids(db_paths, checkpoint_conn)
     total_doc_pairs = len(doc_pairs)
     already_processed = get_processed_count(checkpoint_conn)
-    
+
     print(f"Found {total_doc_pairs:,} unique documents to index for ExFever.")
     if already_processed > 0:
         print(f"Skipping {already_processed:,} already processed documents (resume mode).")
-    
+
     if total_doc_pairs == 0:
         print("All documents already processed. Nothing to do.")
         if checkpoint_conn:
@@ -259,7 +266,9 @@ def main(overwrite: bool = True):
         token=TOKEN,
         enable_dense=False,
         enable_sparse=True,  # Only sparse for BM25-style retrieval
-        sparse_embedding_function=BM25BuiltInFunction(),  # type: ignore
+        sparse_embedding_function=BM25BuiltInFunction(
+            function_params={"k1": bm25_k1, "b": bm25_b}
+        ),  # type: ignore
         overwrite=overwrite,  # Crucial: only overwrite when starting fresh
         use_async_client=False,
     )
@@ -425,20 +434,24 @@ def main(overwrite: bool = True):
 
 if __name__ == "__main__":
     import argparse
-    
+
     parser = argparse.ArgumentParser(description='Build EX-FEVER BM25 index with resume capability')
     parser.add_argument('--overwrite', action='store_true', default=True,
                         help='Overwrite existing index (default: True)')
     parser.add_argument('--resume', action='store_true', default=False,
                         help='Resume from previous checkpoint (overwrites --overwrite)')
-    
+    parser.add_argument('--bm25-k1', type=float, default=0.9,
+                        help='BM25 k1 parameter (default: 0.9 to match GraphCheck)')
+    parser.add_argument('--bm25-b', type=float, default=0.4,
+                        help='BM25 b parameter (default: 0.4 to match GraphCheck)')
+
     args = parser.parse_args()
-    
+
     # Handle resume when no checkpoint exists
     checkpoint_path = get_checkpoint_db_path()
     if args.resume:
         overwrite = not checkpoint_path.exists()
     else:
         overwrite = args.overwrite
-    
-    main(overwrite=overwrite)
+
+    main(overwrite=overwrite, bm25_k1=args.bm25_k1, bm25_b=args.bm25_b)
