@@ -18,3 +18,4 @@ tests/
 docs/
 uv.lock
 *.log
+cache/*
