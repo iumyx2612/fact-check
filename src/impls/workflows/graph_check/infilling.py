@@ -43,8 +43,8 @@ def build_feverous_retriever(document_path: str, similarity_top_k: int = 10) -> 
     return retriever
 
 
-def build_exfever_retriever(db_path: str, similarity_top_k: int = 10) -> BM25Retriever:
-    """Build a BM25 retriever for ExFever dataset."""
+def build_exfever_retriever(db_path: str, similarity_top_k: int = 10) -> BaseRetriever:
+    """Build an ExFever retriever; db_path is kept for compatibility."""
     from src.modules.retrievers.exfever import build_exfever_retriever as build_retriever
     return build_retriever(db_path, similarity_top_k)
 

@@ -6,7 +6,6 @@ from workflows import Workflow, step, Context
 from llama_index.core.llms import LLM
 from llama_index.core.prompts import ChatMessage
 from llama_index.core.retrievers import BaseRetriever
-from llama_index.retrievers.bm25 import BM25Retriever
 
 from src.modules.schema.graph_check.graph import Graph
 from src.modules.prompts.graph_check.verify import VERIFY_TRIPLE_USER, VERIFY_TRIPLE_WITH_CONTEXT_USER
@@ -21,8 +20,8 @@ from src.impls.events.graph_check.context import SynthesisContext
 logger = logging.getLogger(__name__)
 
 
-def build_exfever_retriever(db_path: str, similarity_top_k: int = 10) -> BM25Retriever:
-    """Build a BM25 retriever for ExFever dataset."""
+def build_exfever_retriever(db_path: str, similarity_top_k: int = 10) -> BaseRetriever:
+    """Build an ExFever retriever; db_path is kept for compatibility."""
     from src.modules.retrievers.exfever import build_exfever_retriever as build_retriever
     return build_retriever(db_path, similarity_top_k)
 

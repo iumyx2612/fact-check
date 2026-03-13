@@ -51,7 +51,6 @@ EXFEVER_DB_PATHS = [
     "datas/ex-fever/wiki_wo_links.db"
 ]
 OUTPUT_FILE = "result/exfever-graphcheck.csv"
-PERSIST_DIR = "cache/bm25_retriever"
 PATH_LIMIT = 5
 SIMILARITY_TOP_K = 10
 
@@ -224,7 +223,6 @@ async def benchmark(
     similarity_top_k: int = 10,
     max_samples: int | None = None,
     max_concurrent: int = MAX_CONCURRENT_REQUESTS,
-    persist_dir: str | None = None
 ):
     """
     Run GraphCheck benchmark on ExFever dataset with parallel processing.
@@ -232,13 +230,13 @@ async def benchmark(
     Args:
         data_path: Path to ExFever CSV file
         db_path: Path to ExFever wiki database, or list of paths to merge
+                 (kept for compatibility; not used with Milvus-based retrieval)
         output_file: Output CSV file path
         model_name: OpenAI model to use
         path_limit: Maximum number of paths to try
         similarity_top_k: Number of documents to retrieve
         max_samples: Maximum number of samples to process (None for all)
         max_concurrent: Maximum number of concurrent API requests
-        persist_dir: Directory to persist/load BM25 retriever (None to disable persistence)
     """
 
     logger.info(f"Loading dataset from {data_path}...")
@@ -259,18 +257,14 @@ async def benchmark(
         reuse_client=False  # Better for high-volume async calls
     )
 
-    # Build retriever once and reuse across all samples
-    logger.info("Building BM25 retriever (this may take a moment)...")
-    from src.modules.retrievers.exfever import build_exfever_retriever
-    retriever = build_exfever_retriever(
-        db_path,
-        similarity_top_k,
-        persist_dir,
-        num_workers=6,
-        batch_size=10000,
-        skip_stemming=True
+    # Build Milvus-backed retriever once and reuse across all samples
+    logger.info("Connecting to Milvus-backed ExFever retriever...")
+    from src.modules.retrievers.exfever import build_exfever_milvus_retriever
+
+    retriever = build_exfever_milvus_retriever(
+        similarity_top_k=similarity_top_k,
     )
-    logger.info("Retriever built successfully")
+    logger.info("Retriever ready")
 
     # Create semaphore for rate limiting
     semaphore = asyncio.Semaphore(max_concurrent)
@@ -338,12 +332,8 @@ if __name__ == '__main__':
                         help="Maximum number of samples to process")
     parser.add_argument("--max_concurrent", type=int, default=MAX_CONCURRENT_REQUESTS,
                         help="Maximum number of concurrent API requests (rate limiting)")
-    parser.add_argument("--persist_dir", type=str, default=PERSIST_DIR,
-                        help="Directory to persist/load BM25 retriever (empty string to disable)")
 
     args = parser.parse_args()
-
-    persist_dir = args.persist_dir if args.persist_dir else None
 
     output_file = asyncio.run(benchmark(
         data_path=args.data_path,
@@ -354,7 +344,6 @@ if __name__ == '__main__':
         similarity_top_k=args.top_k,
         max_samples=args.max_samples,
         max_concurrent=args.max_concurrent,
-        persist_dir=persist_dir
     ))
 
     logger.info("Running evaluation...")
