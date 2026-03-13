@@ -73,25 +73,47 @@ CHECKPOINT_COMMIT_INTERVAL = 100  # Commit checkpoints every 100 batches
 
 def init_checkpoint_db(overwrite: bool = False) -> Optional[sqlite3.Connection]:
     """Initialize checkpoint database for resume capability.
-    
+
     Args:
         overwrite: If True, clear existing checkpoint data (fresh start)
-        
+
     Returns:
         SQLite connection object or None if checkpointing disabled
     """
     checkpoint_path = get_checkpoint_db_path()
     if overwrite:
-        # Remove existing checkpoint database for fresh start
         if os.path.exists(checkpoint_path):
             os.remove(checkpoint_path)
             logger.info(f"Removed existing checkpoint database: {checkpoint_path}")
-    
+
     conn = sqlite3.connect(checkpoint_path, timeout=30.0)
-    conn.execute('''CREATE TABLE IF NOT EXISTS indexing_progress
-                   (db_path TEXT, doc_id TEXT, processed_at TIMESTAMP,
-                    PRIMARY KEY (db_path, doc_id))''')
-    conn.commit()
+
+    cursor = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='indexing_progress'"
+    )
+    table_schema = cursor.fetchone()
+    cursor.close()
+
+    if table_schema and 'PRIMARY KEY (doc_id)' in table_schema[0]:
+        logger.info("Detected old checkpoint schema, migrating to composite primary key...")
+        conn.execute('''CREATE TABLE indexing_progress_new
+                       (db_path TEXT, doc_id TEXT, processed_at TIMESTAMP,
+                        PRIMARY KEY (db_path, doc_id))'''
+        )
+        conn.execute('''INSERT INTO indexing_progress_new (db_path, doc_id, processed_at)
+                       SELECT db_path, doc_id, processed_at FROM indexing_progress'''
+        )
+        conn.execute('DROP TABLE indexing_progress')
+        conn.execute('ALTER TABLE indexing_progress_new RENAME TO indexing_progress')
+        conn.commit()
+        logger.info("Checkpoint schema migration completed")
+    else:
+        conn.execute('''CREATE TABLE IF NOT EXISTS indexing_progress
+                       (db_path TEXT, doc_id TEXT, processed_at TIMESTAMP,
+                        PRIMARY KEY (db_path, doc_id))'''
+        )
+        conn.commit()
+
     logger.info(f"Initialized checkpoint database: {checkpoint_path}")
     return conn
 
@@ -106,14 +128,14 @@ def get_processed_count(checkpoint_conn: Optional[sqlite3.Connection]) -> int:
     return count
 
 
-def is_document_processed(checkpoint_conn: Optional[sqlite3.Connection], 
+def is_document_processed(checkpoint_conn: Optional[sqlite3.Connection],
                           db_path: str, doc_id: str) -> bool:
     """Check if a document has already been processed."""
     if checkpoint_conn is None:
         return False
     cursor = checkpoint_conn.execute(
-        "SELECT 1 FROM indexing_progress WHERE doc_id = ? LIMIT 1",
-        (doc_id,)
+        "SELECT 1 FROM indexing_progress WHERE db_path = ? AND doc_id = ? LIMIT 1",
+        (db_path, doc_id)
     )
     result = cursor.fetchone() is not None
     cursor.close()
