@@ -1,6 +1,6 @@
 """Shared configuration constants for the project."""
 
-MILVUS_URI = "https://milvus.vm.trungtd.work:19530"
+MILVUS_URI = "http://localhost:19531"
 MILVUS_TOKEN = "root:Milvus"
 
 FEVEROUS_MILVUS_COLLECTION = "feverous_bm25"

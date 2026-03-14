@@ -14,12 +14,15 @@ Run with:
 import os
 import asyncio
 import json
+import random
 from typing import List
 from dotenv import load_dotenv
 from tqdm import tqdm
 import pandas as pd
 import logging
 import time
+
+from openai import RateLimitError
 
 from llama_index.llms.openai import OpenAI
 from llama_index.core.prompts import ChatMessage
@@ -36,7 +39,7 @@ from src.modules.evaluator import evaluate_file
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.DEBUG,
+    level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
@@ -58,7 +61,37 @@ PATH_LIMIT = 5
 SIMILARITY_TOP_K = 10
 
 # Rate limiting: maximum concurrent API calls
-MAX_CONCURRENT_REQUESTS = 10
+MAX_CONCURRENT_REQUESTS = 1
+
+
+async def retry_on_rate_limit(coro_fn, *args, max_retries: int = 8, base_sleep: float = 1.5, **kwargs):
+    """Retry an async coroutine function on RateLimitError with exponential backoff.
+
+    Args:
+        coro_fn: Async callable to invoke.
+        *args: Positional arguments forwarded to coro_fn.
+        max_retries: Maximum number of retry attempts before re-raising.
+        base_sleep: Base sleep duration in seconds; doubles with each attempt plus jitter.
+        **kwargs: Keyword arguments forwarded to coro_fn.
+
+    Returns:
+        Result of coro_fn on success.
+
+    Raises:
+        RateLimitError: If all retries are exhausted.
+    """
+    for attempt in range(max_retries + 1):
+        try:
+            return await coro_fn(*args, **kwargs)
+        except RateLimitError as e:
+            if attempt == max_retries:
+                raise
+            sleep_duration = base_sleep * (2 ** attempt) + random.uniform(0, 1)
+            logger.warning(
+                f"Rate limit hit (attempt {attempt + 1}/{max_retries}), "
+                f"sleeping {sleep_duration:.1f}s before retry..."
+            )
+            await asyncio.sleep(sleep_duration)
 
 
 def normalize_prediction(prediction: str) -> str:
@@ -172,188 +205,201 @@ async def run_graphcheck_for_sample_detailed(
         "elapsed_time": 0,
         "path_results": []  # Store results for each path attempted
     }
-    
-    try:
-        logger.info(f"Processing claim: {claim[:80]}...")
 
-        # Graph Construction
-        construct_start = time.time()
-        construct_wf = GraphConstructWorkflow(llm=llm)
-        graph_result = await construct_wf.run(
-            start_event=ConstructGraphStartEvent(claim=claim)
-        )
-        construct_time = time.time() - construct_start
-        tracking["total_llm_calls"] += 1
+    async def _run_single_sample() -> dict:
+        nonlocal start_time, tracking
+        try:
+            logger.info(f"Processing claim: {claim[:80]}...")
 
-        graph_obj = graph_result.graph if hasattr(graph_result, 'graph') else graph_result
-        tracking["graph_construction"] = {
-            "time": construct_time,
-            "details": extract_graph_details(graph_obj),
-            "raw_result": str(graph_result)[:200]  # Truncate for storage
-        }
-        
-        logger.debug(f"Graph constructed with {graph_obj.num_la_ent} latent entities, {len(graph_obj.total_triples)} triples")
-
-        if graph_obj.num_la_ent == 0:
-            logger.debug("No latent entities, skipping infilling")
-            tracking["path_generation"] = {"paths": [], "count": 0}
-            tracking["infilling"] = {"skipped": True, "reason": "no_latent_entities"}
-            
-            verification_wf = VerificationWorkflow(
-                llm=llm,
-                retriever=retriever,
-                dataset_type="exfever"
+            # Graph Construction
+            construct_start = time.time()
+            construct_wf = GraphConstructWorkflow(llm=llm)
+            graph_result = await retry_on_rate_limit(
+                construct_wf.run,
+                start_event=ConstructGraphStartEvent(claim=claim)
             )
-            result = await verification_wf.run(
-                start_event=VerificationStartEvent(graph=graph_obj)
-            )
-            tracking["total_llm_calls"] += len(result.verification_results)
-            normalized_pred = normalize_prediction(result.prediction)
-            tracking["final_prediction"] = normalized_pred
-            tracking["verification"] = {
-                "time": 0,  # Will be calculated below
-                "results": result.verification_results,
-                "details": extract_verification_details(result)
+            construct_time = time.time() - construct_start
+            tracking["total_llm_calls"] += 1
+
+            graph_obj = graph_result.graph if hasattr(graph_result, 'graph') else graph_result
+            tracking["graph_construction"] = {
+                "time": construct_time,
+                "details": extract_graph_details(graph_obj),
+                "raw_result": str(graph_result)[:200]  # Truncate for storage
             }
             
-            tracking["elapsed_time"] = time.time() - start_time
-            logger.info(f"Result: {normalized_pred} | Triples: {len(graph_obj.total_triples)} | "
-                       f"LLM calls: {tracking['total_llm_calls']} | Time: {tracking['elapsed_time']:.1f}s")
-            return tracking
+            logger.debug(f"Graph constructed with {graph_obj.num_la_ent} latent entities, {len(graph_obj.total_triples)} triples")
 
-        # Path Generation
-        paths = graph_obj.get_valid_paths(path_limit)
-        tracking["path_generation"] = {
-            "paths": paths,
-            "count": len(paths)
-        }
-        logger.debug(f"Generated {len(paths)} valid paths")
-
-        if not paths:
-            paths = [[]]
-
-        # Try each path
-        path_results = []
-        logger.debug(f"Starting path loop with {len(paths)} paths")
-        for path_idx, path in enumerate(paths):
-            logger.debug(f"Trying path {path_idx + 1}/{len(paths)}: {path}")
-            logger.debug(f"Current path_results length before processing: {len(path_results)}")
-            
-            path_start = time.time()
-            
-            # Infilling
-            infilling_start = time.time()
-            infilling_wf = InfillingWorkflow(
-                llm=llm,
-                retriever=retriever,
-                dataset_type="exfever"
-            )
-
-            infilling_result = await infilling_wf.run(
-                start_event=InfillingStartEvent(claim=claim, path=path, graph=graph_obj)
-            )
-            infilling_time = time.time() - infilling_start
-            tracking["total_llm_calls"] += len(path)  # Approximate LLM calls for infilling
-
-            infilled_graph = infilling_result.graph
-            
-            path_infilling_details = {
-                "path": path,
-                "time": infilling_time,
-                "details": extract_infilling_details(infilling_result),
-                "success": infilling_result is not None and hasattr(infilling_result, 'graph')
-            }
-
-            # Verification
-            verification_start = time.time()
-            verification_wf = VerificationWorkflow(
-                llm=llm,
-                retriever=retriever,
-                dataset_type="exfever"
-            )
-
-            result = await verification_wf.run(
-                start_event=VerificationStartEvent(graph=infilled_graph)
-            )
-            verification_time = time.time() - verification_start
-            tracking["total_llm_calls"] += len(result.verification_results)
-            
-            path_verification_details = {
-                "time": verification_time,
-                "results": result.verification_results,
-                "details": extract_verification_details(result),
-                "prediction": result.prediction
-            }
-
-            path_total_time = time.time() - path_start
-            
-            path_result = {
-                "path_index": path_idx,
-                "path": path,
-                "infilling": path_infilling_details,
-                "verification": path_verification_details,
-                "total_time": path_total_time,
-                "graph_details": extract_graph_details(infilled_graph),
-                "prediction": result.prediction,
-                "normalized_prediction": normalize_prediction(result.prediction)
-            }
-            
-            path_results.append(path_result)
-            tracking["path_results"] = path_results
-            logger.debug(f"Path result appended. Total path_results length: {len(path_results)}")
-
-            logger.debug(f"Infilling: {infilling_time:.1f}s | Verification: {verification_time:.1f}s | "
-                        f"Triples verified: {len(result.verification_results)}")
-
-            if result.prediction == "SUPPORTED":
-                normalized_pred = normalize_prediction(result.prediction)
-                elapsed = time.time() - start_time
-                tracking["final_prediction"] = normalized_pred
-                tracking["is_correct"] = normalized_pred == label
-                tracking["elapsed_time"] = elapsed
-                tracking["graph_construction"]["time"] = construct_time
-                tracking["path_generation"]["selected_path_index"] = path_idx
-                tracking["infilling"] = path_infilling_details
-                tracking["verification"] = path_verification_details
+            if graph_obj.num_la_ent == 0:
+                logger.debug("No latent entities, skipping infilling")
+                tracking["path_generation"] = {"paths": [], "count": 0}
+                tracking["infilling"] = {"skipped": True, "reason": "no_latent_entities"}
                 
-                logger.info(f"Result: {normalized_pred} | Paths tried: {path_idx + 1}/{len(paths)} | "
-                           f"Triples: {len(infilled_graph.total_triples)} | LLM calls: {tracking['total_llm_calls']} | "
-                           f"Time: {elapsed:.1f}s")
+                verification_wf = VerificationWorkflow(
+                    llm=llm,
+                    retriever=retriever,
+                    dataset_type="exfever"
+                )
+                result = await retry_on_rate_limit(
+                    verification_wf.run,
+                    start_event=VerificationStartEvent(graph=graph_obj)
+                )
+                tracking["total_llm_calls"] += len(result.verification_results)
+                normalized_pred = normalize_prediction(result.prediction)
+                tracking["final_prediction"] = normalized_pred
+                tracking["verification"] = {
+                    "time": 0,  # Will be calculated below
+                    "results": result.verification_results,
+                    "details": extract_verification_details(result)
+                }
+                
+                tracking["elapsed_time"] = time.time() - start_time
+                logger.info(f"Result: {normalized_pred} | Triples: {len(graph_obj.total_triples)} | "
+                           f"LLM calls: {tracking['total_llm_calls']} | Time: {tracking['elapsed_time']:.1f}s")
                 return tracking
 
-        # All paths failed
-        logger.debug(f"All paths failed. Final path_results length: {len(path_results)}")
-        normalized_pred = normalize_prediction("NOT_SUPPORTED")
-        elapsed = time.time() - start_time
-        tracking["final_prediction"] = normalized_pred
-        tracking["is_correct"] = normalized_pred == label
-        tracking["elapsed_time"] = elapsed
-        tracking["graph_construction"]["time"] = construct_time
-        tracking["path_generation"]["selected_path_index"] = -1  # No successful path
-        tracking["infilling"] = {"attempted_paths": len(paths), "all_failed": True}
-        if tracking["path_results"]:
-            tracking["verification"] = tracking["path_results"][-1]["verification"]  # Last attempt
-        else:
-            logger.debug(f"tracking['path_results'] is empty: {tracking.get('path_results', [])}")
-            # Create empty verification structure when no paths were attempted
-            tracking["verification"] = {
-                "time": 0,
-                "results": [],
-                "details": extract_verification_details(None)
+            # Path Generation
+            paths = graph_obj.get_valid_paths(path_limit)
+            tracking["path_generation"] = {
+                "paths": paths,
+                "count": len(paths)
             }
-        
-        logger.info(f"Result: {normalized_pred} | All {len(paths)} paths failed | "
-                   f"Triples: {len(graph_obj.total_triples)} | LLM calls: {tracking['total_llm_calls']} | "
-                   f"Time: {elapsed:.1f}s")
-        return tracking
+            logger.debug(f"Generated {len(paths)} valid paths")
 
-    except Exception as e:
-        elapsed = time.time() - start_time
-        tracking["error"] = str(e)
-        tracking["elapsed_time"] = elapsed
-        tracking["final_prediction"] = "REFUTE"  # Default on error
-        logger.error(f"Error processing claim '{claim[:50]}...': {e} | Time: {elapsed:.1f}s", exc_info=True)
-        return tracking
+            if not paths:
+                paths = [[]]
+
+            # Try each path
+            path_results = []
+            logger.debug(f"Starting path loop with {len(paths)} paths")
+            for path_idx, path in enumerate(paths):
+                logger.debug(f"Trying path {path_idx + 1}/{len(paths)}: {path}")
+                logger.debug(f"Current path_results length before processing: {len(path_results)}")
+                
+                path_start = time.time()
+                
+                # Infilling
+                infilling_start = time.time()
+                infilling_wf = InfillingWorkflow(
+                    llm=llm,
+                    retriever=retriever,
+                    dataset_type="exfever"
+                )
+
+                infilling_result = await retry_on_rate_limit(
+                    infilling_wf.run,
+                    start_event=InfillingStartEvent(claim=claim, path=path, graph=graph_obj)
+                )
+                infilling_time = time.time() - infilling_start
+                tracking["total_llm_calls"] += len(path)  # Approximate LLM calls for infilling
+
+                infilled_graph = infilling_result.graph
+                
+                path_infilling_details = {
+                    "path": path,
+                    "time": infilling_time,
+                    "details": extract_infilling_details(infilling_result),
+                    "success": infilling_result is not None and hasattr(infilling_result, 'graph')
+                }
+
+                # Verification
+                verification_start = time.time()
+                verification_wf = VerificationWorkflow(
+                    llm=llm,
+                    retriever=retriever,
+                    dataset_type="exfever"
+                )
+
+                result = await retry_on_rate_limit(
+                    verification_wf.run,
+                    start_event=VerificationStartEvent(graph=infilled_graph)
+                )
+                verification_time = time.time() - verification_start
+                tracking["total_llm_calls"] += len(result.verification_results)
+                
+                path_verification_details = {
+                    "time": verification_time,
+                    "results": result.verification_results,
+                    "details": extract_verification_details(result),
+                    "prediction": result.prediction
+                }
+
+                path_total_time = time.time() - path_start
+                
+                path_result = {
+                    "path_index": path_idx,
+                    "path": path,
+                    "infilling": path_infilling_details,
+                    "verification": path_verification_details,
+                    "total_time": path_total_time,
+                    "graph_details": extract_graph_details(infilled_graph),
+                    "prediction": result.prediction,
+                    "normalized_prediction": normalize_prediction(result.prediction)
+                }
+                
+                path_results.append(path_result)
+                tracking["path_results"] = path_results
+                logger.debug(f"Path result appended. Total path_results length: {len(path_results)}")
+
+                logger.debug(f"Infilling: {infilling_time:.1f}s | Verification: {verification_time:.1f}s | "
+                            f"Triples verified: {len(result.verification_results)}")
+
+                if result.prediction == "SUPPORTED":
+                    normalized_pred = normalize_prediction(result.prediction)
+                    elapsed = time.time() - start_time
+                    tracking["final_prediction"] = normalized_pred
+                    tracking["is_correct"] = normalized_pred == label
+                    tracking["elapsed_time"] = elapsed
+                    tracking["graph_construction"]["time"] = construct_time
+                    tracking["path_generation"]["selected_path_index"] = path_idx
+                    tracking["infilling"] = path_infilling_details
+                    tracking["verification"] = path_verification_details
+                    
+                    logger.info(f"Result: {normalized_pred} | Paths tried: {path_idx + 1}/{len(paths)} | "
+                               f"Triples: {len(infilled_graph.total_triples)} | LLM calls: {tracking['total_llm_calls']} | "
+                               f"Time: {elapsed:.1f}s")
+                    return tracking
+
+            # All paths failed
+            logger.debug(f"All paths failed. Final path_results length: {len(path_results)}")
+            normalized_pred = normalize_prediction("NOT_SUPPORTED")
+            elapsed = time.time() - start_time
+            tracking["final_prediction"] = normalized_pred
+            tracking["is_correct"] = normalized_pred == label
+            tracking["elapsed_time"] = elapsed
+            tracking["graph_construction"]["time"] = construct_time
+            tracking["path_generation"]["selected_path_index"] = -1  # No successful path
+            tracking["infilling"] = {"attempted_paths": len(paths), "all_failed": True}
+            if tracking["path_results"]:
+                tracking["verification"] = tracking["path_results"][-1]["verification"]  # Last attempt
+            else:
+                logger.debug(f"tracking['path_results'] is empty: {tracking.get('path_results', [])}")
+                # Create empty verification structure when no paths were attempted
+                tracking["verification"] = {
+                    "time": 0,
+                    "results": [],
+                    "details": extract_verification_details(None)
+                }
+            
+            logger.info(f"Result: {normalized_pred} | All {len(paths)} paths failed | "
+                       f"Triples: {len(graph_obj.total_triples)} | LLM calls: {tracking['total_llm_calls']} | "
+                       f"Time: {elapsed:.1f}s")
+            return tracking
+
+        except Exception as e:
+            elapsed = time.time() - start_time
+            tracking["error"] = str(e)
+            tracking["elapsed_time"] = elapsed
+            tracking["final_prediction"] = "REFUTE"  # Default on error
+            logger.error(f"Error processing claim '{claim[:50]}...': {e} | Time: {elapsed:.1f}s", exc_info=True)
+            return tracking
+
+    # Enforce global concurrency limit if a semaphore is provided
+    if semaphore is not None:
+        async with semaphore:
+            return await _run_single_sample()
+
+    return await _run_single_sample()
 
 
 def extract_verification_details(verification_result):
@@ -495,11 +541,11 @@ async def benchmark(
             
             # Verification Details
             "verification_time": result["verification"].get("time", 0),
-            "verification_triples_processed": result["verification"]["details"]["triples_processed"],
-            "verification_support_count": result["verification"]["details"]["support_count"],
-            "verification_refute_count": result["verification"]["details"]["refute_count"],
-            "verification_nei_count": result["verification"]["details"]["nei_count"],
-            "verification_final_prediction": result["verification"]["details"]["final_prediction"],
+            "verification_triples_processed": result["verification"].get("details", {}).get("triples_processed", 0),
+            "verification_support_count": result["verification"].get("details", {}).get("support_count", 0),
+            "verification_refute_count": result["verification"].get("details", {}).get("refute_count", 0),
+            "verification_nei_count": result["verification"].get("details", {}).get("nei_count", 0),
+            "verification_final_prediction": result["verification"].get("details", {}).get("final_prediction", ""),
             
             # Overall Metrics
             "total_llm_calls": result["total_llm_calls"],

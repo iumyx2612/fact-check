@@ -169,6 +169,6 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         csv_path = sys.argv[1]
     else:
-        csv_path = "result/exfever-graphcheck.csv"
+        csv_path = "/home/an/code/fact-check/result/exfever-graphcheck-detailed.csv"
 
     evaluate_graphcheck_results(csv_path)
