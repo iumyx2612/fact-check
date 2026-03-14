@@ -37,8 +37,8 @@ logger = logging.getLogger(__name__)
 
 # Paths to the ExFever Wikipedia SQLite databases
 EXFEVER_DB_PATHS: List[str] = [
-    "datas/ex-fever/wiki_db.db",
-    "datas/ex-fever/wiki_wo_links.db",
+    "datas/ex-fever/wiki_db.db", # small database without links, use small for testing
+    "datas/ex-fever/wiki_wo_links.db", # large database with links
 ]
 
 # Milvus connection parameters (keep consistent with Feverous index)
@@ -231,11 +231,11 @@ def main(overwrite: bool = True, bm25_k1: float = 0.9, bm25_b: float = 0.4):
 
     Args:
         overwrite: Whether to overwrite existing collection
-        bm25_k1: BM25 k1 parameter (default: 0.9 to match GraphCheck)
-        bm25_b: BM25 b parameter (default: 0.4 to match GraphCheck)
+        bm25_k1: BM25 k1 parameter for the sparse index (term frequency saturation)
+        bm25_b: BM25 b parameter for the sparse index (length normalization)
     """
     print(f"Starting EX-FEVER indexing (overwrite={overwrite})...")
-    print(f"Using BM25 parameters: k1={bm25_k1}, b={bm25_b}")
+    print(f"Using BM25 index parameters: k1={bm25_k1}, b={bm25_b}")
 
     # Initialize checkpoint database
     checkpoint_conn = init_checkpoint_db(overwrite=overwrite)
@@ -266,9 +266,8 @@ def main(overwrite: bool = True, bm25_k1: float = 0.9, bm25_b: float = 0.4):
         token=TOKEN,
         enable_dense=False,
         enable_sparse=True,  # Only sparse for BM25-style retrieval
-        sparse_embedding_function=BM25BuiltInFunction(
-            function_params={"k1": bm25_k1, "b": bm25_b}
-        ),  # type: ignore
+        sparse_embedding_function=BM25BuiltInFunction(),  # type: ignore
+        sparse_index_config={"bm25_k1": bm25_k1, "bm25_b": bm25_b},
         overwrite=overwrite,  # Crucial: only overwrite when starting fresh
         use_async_client=False,
     )
@@ -441,10 +440,9 @@ if __name__ == "__main__":
     parser.add_argument('--resume', action='store_true', default=False,
                         help='Resume from previous checkpoint (overwrites --overwrite)')
     parser.add_argument('--bm25-k1', type=float, default=0.9,
-                        help='BM25 k1 parameter (default: 0.9 to match GraphCheck)')
+                        help='BM25 k1 parameter for sparse index (default: 0.9)')
     parser.add_argument('--bm25-b', type=float, default=0.4,
-                        help='BM25 b parameter (default: 0.4 to match GraphCheck)')
-
+                        help='BM25 b parameter for sparse index (default: 0.4)')
     args = parser.parse_args()
 
     # Handle resume when no checkpoint exists

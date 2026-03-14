@@ -16,6 +16,8 @@ result/
 
 tests/
 docs/
+*.lock
 uv.lock
 *.log
 cache/*
+*.db
