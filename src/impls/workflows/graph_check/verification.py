@@ -1,5 +1,4 @@
 import logging
-import asyncio
 from typing import Optional
 
 from workflows import Workflow, step, Context
@@ -7,12 +6,13 @@ from llama_index.core.llms import LLM
 from llama_index.core.prompts import ChatMessage
 from llama_index.core.retrievers import BaseRetriever
 
-from src.modules.schema.graph_check.graph import Graph
+from src.modules.graph_check.graph import Graph
 from src.modules.prompts.graph_check.verify import (
     VERIFY_TRIPLE_USER,
     VERIFY_TRIPLE_WITH_CONTEXT_USER,
-    BINARY_VERIFY_TRIPLE_USER,
-    BINARY_VERIFY_TRIPLE_WITH_CONTEXT_USER
+    GRAPH_CHECK_VERIFY_NO_EVIDENCE,
+    GRAPH_CHECK_VERIFY_WITH_EVIDENCE,
+    GRAPH_CHECK_VERIFY_WITH_GOLD_AND_RETRIEVED,
 )
 from src.impls.events.graph_check.verification import (
     VerificationStartEvent,
@@ -21,8 +21,42 @@ from src.impls.events.graph_check.verification import (
     VerificationStopEvent
 )
 from src.impls.events.graph_check.context import SynthesisContext
+from .debug_utils import log_retrieved_nodes
+from .trace_sink import (
+    GraphCheckTraceSink,
+    NullGraphCheckTrace,
+    nodes_to_previews,
+    trace_uses_logger_fallback,
+)
 
 logger = logging.getLogger(__name__)
+
+# Match ``tests/original_graphcheck.TracedGraphCheck`` / ``OpenAIBaseModel.verify``:
+# retrieved text capped at 4000 chars, then prompt uses up to 3000 chars.
+GRAPH_CHECK_RETRIEVAL_EVIDENCE_CAP = 4000
+GRAPH_CHECK_PROMPT_EVIDENCE_CAP = 3000
+
+
+async def _llm_verify_chat_raw_static(llm: LLM, prompt: ChatMessage) -> str:
+    """Run verification LLM call; on failure return empty string like ``OpenAIBaseModel.generate``."""
+    try:
+        response = await llm.achat([prompt])
+        return (response.message.content or "").strip()
+    except Exception as e:
+        logger.error(f"OpenAI API error: {e}")
+        return ""
+
+
+def parse_graphcheck_binary_answer(raw_out: str) -> str:
+    """Match ``tests/original_graphcheck.OpenAIBaseModel.verify`` boolean parsing."""
+    answer = raw_out.lower().strip(" .")
+    if answer in ("true", "yes", "supported"):
+        return "SUPPORTED"
+    if answer in ("false", "no", "not supported"):
+        return "NOT_SUPPORTED"
+    if "not " in answer or "false" in answer:
+        return "NOT_SUPPORTED"
+    return "NOT_SUPPORTED"
 
 
 def build_exfever_retriever(db_path: str, similarity_top_k: int = 10) -> BaseRetriever:
@@ -48,10 +82,9 @@ class VerificationWorkflow(Workflow):
                    db_path: Optional[str] = None,
                    similarity_top_k: int = 10,
                    document_level: str = "concat+each",
-                   classification_mode: str = "three_way",
+                   classification_mode: str = "binary",
                    dataset_type: Optional[str] = None,
-                   parallel_verification: bool = True,
-                   max_concurrent_verifications: int = 5,
+                   trace: GraphCheckTraceSink | None = None,
                    **kwargs):
         """
         Initialize verification workflow.
@@ -64,15 +97,11 @@ class VerificationWorkflow(Workflow):
             document_level: Verification mode - "concat", "each", or "concat+each"
             classification_mode: Classification mode - "three_way" or "binary"
             dataset_type: Dataset type (unused, kept for compatibility)
-            parallel_verification: Whether to verify triples in parallel
-            max_concurrent_verifications: Maximum concurrent verifications when parallel=True
         """
         super().__init__(**kwargs)
         self.llm = llm
         self.document_level = document_level
         self.classification_mode = classification_mode
-        self.parallel_verification = parallel_verification
-        self.max_concurrent_verifications = max_concurrent_verifications
 
         if retriever is not None:
             self.retriever = retriever
@@ -80,6 +109,11 @@ class VerificationWorkflow(Workflow):
             self.retriever = build_exfever_retriever(db_path, similarity_top_k)
         else:
             raise ValueError("Either retriever or db_path must be provided")
+        self.trace: GraphCheckTraceSink = trace or NullGraphCheckTrace()
+        self._trace_uses_logger_fallback = trace_uses_logger_fallback(self.trace)
+
+    async def _llm_verify_chat_raw(self, prompt: ChatMessage) -> str:
+        return await _llm_verify_chat_raw_static(self.llm, prompt)
 
     @step
     async def initialize(
@@ -94,6 +128,7 @@ class VerificationWorkflow(Workflow):
             ctx_state.verification_results = []
             ctx_state.prediction = "SUPPORTED"  # Start with SUPPORTED, change to NOT_SUPPORTED if any fails
             ctx_state.graph = graph
+            ctx_state.path_index_for_trace = ev.path_index
 
         return VerificationLoopInitialize()
 
@@ -101,31 +136,25 @@ class VerificationWorkflow(Workflow):
     async def loop_init(
             self, ctx: Context[SynthesisContext], ev: VerificationLoopInitialize
     ) -> VerifyTripleEvent | VerificationStopEvent:
-        """Initialize verification loop and send first triple or stop if no triples."""
+        """Initialize verification loop and send first triple or stop if no triples.
+        
+        Matches original GraphCheck.verify_graph: simple for-loop iteration
+        with natural break on NOT_SUPPORTED.
+        """
         graph = await ctx.store.get("graph")
-
-        # If parallel verification is enabled, collect all triples and verify in parallel
-        if self.parallel_verification and len(graph.total_triples) > 1:
-            return await self._verify_all_triples_parallel(ctx, graph)
-
-        # Sequential verification (original behavior)
         verification_index = await ctx.store.get("verification_index")
 
-        # Find next valid triple with non-None sentence
-        while verification_index < len(graph.total_triples):
+        # Match original: simple sequential iteration through all triples
+        if verification_index < len(graph.total_triples):
             triple = graph.total_triples[verification_index]
-            # Use sentence if available, otherwise use triplet_text
+            # Defensive: handle None sentence (fallback to triplet_text if needed)
             triple_text = triple.sentence if triple.sentence else triple.triplet_text
-            if triple_text:
-                return VerifyTripleEvent(triple_text=triple_text)
-            # Skip triples with no valid text
-            verification_index += 1
-            async with ctx.store.edit_state() as ctx_state:
-                ctx_state.verification_index = verification_index
+            return VerifyTripleEvent(triple_text=triple_text)
 
-        # All triples processed or skipped
+        # All triples processed - return final result
         prediction = await ctx.store.get("prediction")
         verification_results = await ctx.store.get("verification_results")
+
         return VerificationStopEvent(
             prediction=prediction,
             verification_results=verification_results
@@ -135,189 +164,131 @@ class VerificationWorkflow(Workflow):
     async def verify_triple(
             self, ctx: Context[SynthesisContext], ev: VerifyTripleEvent
     ) -> VerificationLoopInitialize | VerificationStopEvent:
-        """
-        Verify a single triple against retrieved evidence.
-
-        Implements three document_level modes:
-        - concat: Verify against all retrieved documents concatenated
-        - each: Verify against each document individually
-        - concat+each: Try concat first, fall back to each if concat fails
-        """
+        """Verify a single triple against retrieved evidence."""
         graph: Graph = await ctx.store.get("graph")
         verification_index = await ctx.store.get("verification_index")
         verification_results = await ctx.store.get("verification_results")
         current_prediction = await ctx.store.get("prediction")
 
-        # Get the current triple
         triple_text = ev.triple_text
-        logger.debug(f"Verifying triple {verification_index + 1}/{len(graph.total_triples)}: {triple_text[:50]}...")
 
         # Retrieve evidence
         nodes = self.retriever.retrieve(triple_text)
 
         # Verify based on document_level setting
         if self.document_level == "concat":
-            prediction, verification_details = await self._verify_concat(triple_text, nodes)
+            prediction, verification_details, llm_raw = await self._verify_concat(triple_text, nodes)
         elif self.document_level == "each":
-            prediction, verification_details = await self._verify_each(triple_text, nodes)
+            prediction, verification_details, llm_raw = await self._verify_each(triple_text, nodes)
         elif self.document_level == "concat+each":
-            prediction, verification_details = await self._verify_concat_each(triple_text, nodes)
+            prediction, verification_details, llm_raw = await self._verify_concat_each(triple_text, nodes)
         else:
             raise ValueError(f"Unknown document_level: {self.document_level}")
 
         # Record result
         result = {
-            "triple": triple_text,
+            "subclaim": triple_text,
             "prediction": prediction,
-            "mode": self.document_level,
-            "verification_details": verification_details
         }
         verification_results.append(result)
 
-        # Update prediction - if any triple is NOT_SUPPORTED, the whole path fails
+        path_idx = int(await ctx.store.get("path_index_for_trace"))
+        doc_previews = (
+            [] if self._trace_uses_logger_fallback else nodes_to_previews(nodes)
+        )
+        self.trace.verify_block(
+            path_idx,
+            verification_index + 1,
+            len(graph.total_triples),
+            triple_text,
+            doc_previews,
+            llm_raw,
+            prediction,
+        )
+
+        # Match original: if NOT_SUPPORTED, break immediately
         if prediction == "NOT_SUPPORTED":
             current_prediction = "NOT_SUPPORTED"
+            async with ctx.store.edit_state() as ctx_state:
+                ctx_state.verification_results = verification_results
+                ctx_state.prediction = current_prediction
+                ctx_state.verification_index = len(graph.total_triples)
+            
+            return VerificationStopEvent(
+                prediction=current_prediction,
+                verification_results=verification_results
+            )
 
-        # Move to next triple or finish
+        # Advance to next triple
         async with ctx.store.edit_state() as ctx_state:
             ctx_state.verification_results = verification_results
             ctx_state.prediction = current_prediction
             ctx_state.verification_index = verification_index + 1
 
-        # Find next valid triple to send
-        next_index = verification_index + 1
-        while next_index < len(graph.total_triples):
-            next_triple = graph.total_triples[next_index]
-            next_triple_text = next_triple.sentence if next_triple.sentence else next_triple.triplet_text
-            if next_triple_text:
-                ctx.send_event(VerifyTripleEvent(triple_text=next_triple_text))
-                return VerificationLoopInitialize()
-            next_index += 1
-
-        # All triples verified
-        return VerificationStopEvent(
-            prediction=current_prediction,
-            verification_results=verification_results
-        )
-
-    async def _verify_all_triples_parallel(
-            self, ctx: Context[SynthesisContext], graph: Graph
-    ) -> VerificationStopEvent:
-        """Verify all triples in parallel using asyncio.gather()."""
-        logger.debug(f"Verifying {len(graph.total_triples)} triples in parallel")
-
-        # Collect all valid triples
-        triples_to_verify = []
-        for triple in graph.total_triples:
-            triple_text = triple.sentence if triple.sentence else triple.triplet_text
-            if triple_text:
-                triples_to_verify.append(triple_text)
-
-        if not triples_to_verify:
-            return VerificationStopEvent(
-                prediction="SUPPORTED",
-                verification_results=[]
-            )
-
-        # Create semaphore for rate limiting
-        semaphore = asyncio.Semaphore(self.max_concurrent_verifications)
-
-# Verify each triple with rate limiting
-        async def verify_single_triple(triple_text: str) -> dict:
-            async with semaphore:
-                # Retrieve evidence
-                nodes = self.retriever.retrieve(triple_text)
-                retrieved_evidence = "\n".join([node.text for node in nodes])
-
-                # Verify with LLM
-                prediction = await self._verify_with_llm(triple_text, retrieved_evidence)
-
-                return {
-                    "triple": triple_text,
-                    "prediction": prediction,
-                    "retrieved_evidence": retrieved_evidence[:500] if retrieved_evidence else ""
-                }
-
-        # Verify all triples in parallel
-        verification_results = await asyncio.gather(
-            *[verify_single_triple(triple_text) for triple_text in triples_to_verify]
-        )
-
-        # Determine final prediction - if any triple is NOT_SUPPORTED, the whole path fails
-        final_prediction = "SUPPORTED"
-        for result in verification_results:
-            if result["prediction"] == "NOT_SUPPORTED":
-                final_prediction = "NOT_SUPPORTED"
-                break
-
-        logger.debug(f"Parallel verification complete: {final_prediction}")
-
-        return VerificationStopEvent(
-            prediction=final_prediction,
-            verification_results=verification_results
-        )
+        return VerificationLoopInitialize()
 
     async def _verify_with_llm(
             self,
             claim: str,
             evidence: str,
             gold_evidence: Optional[str] = None
-    ) -> str:
+    ) -> tuple[str, str]:
         """
         Use LLM to verify a claim against evidence.
 
-        Returns: "SUPPORTED" or "NOT_SUPPORTED"
+        Returns:
+            Tuple of (prediction "SUPPORTED"|"NOT_SUPPORTED", raw model text).
         """
-        # Truncate evidence if too long (similar to original truncate method)
-        max_evidence_len = 40000
-        if len(evidence) > max_evidence_len:
-            evidence = evidence[:max_evidence_len]
-            logger.warning(f"Evidence truncated to {max_evidence_len} characters")
-
         # Prepare prompt based on classification mode
         if self.classification_mode == "binary":
             if gold_evidence:
-                prompt_content = BINARY_VERIFY_TRIPLE_WITH_CONTEXT_USER.format(
+                ev_for_prompt = (
+                    evidence[:GRAPH_CHECK_PROMPT_EVIDENCE_CAP]
+                    if evidence
+                    else ""
+                )
+                gold_trim = gold_evidence[:GRAPH_CHECK_PROMPT_EVIDENCE_CAP]
+                prompt_content = GRAPH_CHECK_VERIFY_WITH_GOLD_AND_RETRIEVED.format(
                     claim=claim,
-                    gold_evidence=gold_evidence,
-                    retrieved_evidence=evidence
+                    gold_evidence=gold_trim,
+                    retrieved_evidence=ev_for_prompt,
+                )
+            elif evidence:
+                # Match ``OpenAIBaseModel.verify``: use ``if not evidence`` (truthiness), not strip()
+                ev_for_prompt = evidence[:GRAPH_CHECK_PROMPT_EVIDENCE_CAP]
+                prompt_content = GRAPH_CHECK_VERIFY_WITH_EVIDENCE.format(
+                    claim=claim,
+                    evidence=ev_for_prompt,
                 )
             else:
-                prompt_content = BINARY_VERIFY_TRIPLE_USER.format(
-                    claim=claim,
-                    evidence=evidence
-                )
-        else:  # three_way (default)
+                prompt_content = GRAPH_CHECK_VERIFY_NO_EVIDENCE.format(claim=claim)
+        else:  # three_way — align evidence length with binary graphcheck (max 3000 in prompt)
+            ev_prompt = evidence[:GRAPH_CHECK_PROMPT_EVIDENCE_CAP] if evidence else ""
             if gold_evidence:
+                gold_prompt = gold_evidence[:GRAPH_CHECK_PROMPT_EVIDENCE_CAP]
                 prompt_content = VERIFY_TRIPLE_WITH_CONTEXT_USER.format(
                     claim=claim,
-                    gold_evidence=gold_evidence,
-                    retrieved_evidence=evidence
+                    gold_evidence=gold_prompt,
+                    retrieved_evidence=ev_prompt,
                 )
             else:
                 prompt_content = VERIFY_TRIPLE_USER.format(
                     claim=claim,
-                    evidence=evidence
+                    evidence=ev_prompt,
                 )
 
         prompt = ChatMessage(content=prompt_content, role="user")
-        response = await self.llm.achat([prompt])
-        content = response.message.content
-        answer = content.strip().upper() if content else ""
+        raw_out = await self._llm_verify_chat_raw(prompt)
 
         # Parse the answer based on classification mode
         if self.classification_mode == "binary":
-            if "TRUE" in answer:
-                return "SUPPORTED"
-            else:
-                return "NOT_SUPPORTED"  # Default to NOT_SUPPORTED for uncertain responses
-        else:  # three_way
-            if "SUPPORT" in answer and "NOT ENOUGH INFORMATION" not in answer:
-                return "SUPPORTED"
-            elif "REFUTE" in answer:
-                return "NOT_SUPPORTED"  # In graphcheck, refuted triples count as NOT_SUPPORTED
-            else:
-                return "NOT_SUPPORTED"  # Treat "NOT ENOUGH INFORMATION" as NOT_SUPPORTED for graphcheck
+            return parse_graphcheck_binary_answer(raw_out), raw_out
+        answer_upper = raw_out.upper()
+        if "SUPPORT" in answer_upper and "NOT ENOUGH INFORMATION" not in answer_upper:
+            return "SUPPORTED", raw_out
+        if "REFUTE" in answer_upper:
+            return "NOT_SUPPORTED", raw_out
+        return "NOT_SUPPORTED", raw_out
 
     async def _verify_concat(
             self,
@@ -334,16 +305,13 @@ class VerificationWorkflow(Workflow):
         Returns:
             Tuple of (prediction, verification_details)
         """
-        # Concatenate all evidences with separator
-        combined_evidence = " [SEP] ".join([node.text for node in nodes])
-
-        # Truncate to 40k characters (matching original GraphCheck)
-        max_evidence_len = 40000
-        if len(combined_evidence) > max_evidence_len:
-            combined_evidence = combined_evidence[:max_evidence_len]
+        # Same join/cap as ``TracedGraphCheck.retrieve_evidence`` (newline + 4000 chars)
+        combined_evidence = "\n".join([node.text for node in nodes])
+        if len(combined_evidence) > GRAPH_CHECK_RETRIEVAL_EVIDENCE_CAP:
+            combined_evidence = combined_evidence[:GRAPH_CHECK_RETRIEVAL_EVIDENCE_CAP]
 
         # Call verification model
-        prediction = await self._verify_with_llm(claim, combined_evidence)
+        prediction, llm_raw = await self._verify_with_llm(claim, combined_evidence)
 
         verification_details = {
             "method": "concatenated",
@@ -351,7 +319,7 @@ class VerificationWorkflow(Workflow):
             "evidence_preview": combined_evidence[:200] if combined_evidence else ""
         }
 
-        return prediction, verification_details
+        return prediction, verification_details, llm_raw
 
     async def _verify_each(
             self,
@@ -366,16 +334,17 @@ class VerificationWorkflow(Workflow):
             nodes: Retrieved document nodes
 
         Returns:
-            Tuple of (prediction, verification_details)
+            Tuple of (prediction, verification_details, concatenated raw LLM outputs)
         """
         individual_results = []
+        raws: list[str] = []
 
         for node in nodes:
-            # Truncate each evidence to 40k characters
-            evidence = node.text[:40000]
+            evidence = node.text[:GRAPH_CHECK_RETRIEVAL_EVIDENCE_CAP]
 
             # Call verification model
-            prediction = await self._verify_with_llm(claim, evidence)
+            prediction, raw_one = await self._verify_with_llm(claim, evidence)
+            raws.append(raw_one)
 
             individual_results.append({
                 "evidence_preview": evidence[:100] + "...",
@@ -392,7 +361,7 @@ class VerificationWorkflow(Workflow):
             "aggregated": aggregated
         }
 
-        return aggregated["prediction"], verification_details
+        return aggregated["prediction"], verification_details, "\n---\n".join(raws)
 
     async def _verify_concat_each(
             self,
@@ -407,15 +376,15 @@ class VerificationWorkflow(Workflow):
             nodes: Retrieved document nodes
 
         Returns:
-            Tuple of (prediction, verification_details)
+            Tuple of (prediction, verification_details, raw LLM text for trace)
         """
         # Try concat mode first
-        concat_prediction, concat_details = await self._verify_concat(claim, nodes)
+        concat_prediction, concat_details, concat_raw = await self._verify_concat(claim, nodes)
 
         # Fallback logic: if concat result is uncertain, try each mode
         if self._is_uncertain(concat_prediction):
             logger.debug(f"Concat result uncertain ({concat_prediction}), falling back to each mode")
-            each_prediction, each_details = await self._verify_each(claim, nodes)
+            each_prediction, each_details, each_raw = await self._verify_each(claim, nodes)
 
             verification_details = {
                 "method": "concat+each (fallback)",
@@ -424,25 +393,24 @@ class VerificationWorkflow(Workflow):
                 "final_method": "each"
             }
 
-            return each_prediction, verification_details
+            return each_prediction, verification_details, f"concat:\n{concat_raw}\n---\neach:\n{each_raw}"
 
         verification_details = {
             "method": "concat+each (concat succeeded)",
             "final_method": "concat"
         }
 
-        return concat_prediction, verification_details
+        return concat_prediction, verification_details, concat_raw
 
-    def _is_uncertain(self, prediction: str) -> bool:
+    def _is_uncertain(self, _prediction: str) -> bool:
         """
-        Check if verification result is uncertain.
+        Whether concat mode should fall back to per-document verification.
 
-        Original GraphCheck treats "NOT ENOUGH INFORMATION" as uncertain,
-        which triggers fallback to each mode.
+        Treating NOT_SUPPORTED as "uncertain" was wrong: it ran ``each`` mode (one LLM
+        call per retrieved document) on top of concat, exploding API usage and diverging
+        from GraphCheck's single-shot verify per subclaim.
         """
-        # In our implementation, NOT_SUPPORTED already covers both REFUTE and NOT ENOUGH INFO
-        # We consider it uncertain if we want to be more conservative
-        return prediction == "NOT_SUPPORTED"
+        return False
 
     def _aggregate_results(self, individual_results: list[dict]) -> dict:
         """
@@ -517,28 +485,23 @@ class SimpleVerificationWorkflow(Workflow):
         ]
         combined_claim = " && ".join(valid_sentences)
         
-        # Retrieve evidence
+        # Retrieve evidence (same cap as graph path)
         nodes = self.retriever.retrieve(combined_claim)
         evidence = "\n".join([node.text for node in nodes])
-        
-        # Verify with LLM
-        prompt_content = VERIFY_TRIPLE_USER.format(
-            claim=combined_claim,
-            evidence=evidence
-        )
-        
-        prompt = ChatMessage(content=prompt_content, role="user")
-        response = await self.llm.achat([prompt])
-        content = response.message.content
-        answer = content.strip().upper() if content else ""
-        
-        # Parse answer
-        if "SUPPORT" in answer and "NOT ENOUGH INFORMATION" not in answer:
-            prediction = "SUPPORTED"
-        elif "REFUTE" in answer:
-            prediction = "NOT_SUPPORTED"
+        if len(evidence) > GRAPH_CHECK_RETRIEVAL_EVIDENCE_CAP:
+            evidence = evidence[:GRAPH_CHECK_RETRIEVAL_EVIDENCE_CAP]
+
+        if evidence:
+            prompt_content = GRAPH_CHECK_VERIFY_WITH_EVIDENCE.format(
+                claim=combined_claim,
+                evidence=evidence[:GRAPH_CHECK_PROMPT_EVIDENCE_CAP],
+            )
         else:
-            prediction = "NOT_SUPPORTED"
+            prompt_content = GRAPH_CHECK_VERIFY_NO_EVIDENCE.format(claim=combined_claim)
+
+        prompt = ChatMessage(content=prompt_content, role="user")
+        raw_out = await _llm_verify_chat_raw_static(self.llm, prompt)
+        prediction = parse_graphcheck_binary_answer(raw_out)
         
         verification_results = [{
             "combined_claim": combined_claim,

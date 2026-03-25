@@ -33,36 +33,27 @@ Based on the retrieved evidence, determine if it:
 Provide your answer as a single word: SUPPORT, REFUTE, or NOT ENOUGH INFORMATION
 """
 
-# Binary classification prompts (matching original GraphCheck)
-BINARY_VERIFY_TRIPLE_USER = """
-Given a claim and supporting evidence, determine whether the evidence supports or refutes the claim.
+# Binary verification — strings aligned with ``tests/original_graphcheck.OpenAIBaseModel.verify``
+GRAPH_CHECK_VERIFY_NO_EVIDENCE = (
+    "Is this claim true or false? Claim: {claim}\nAnswer only 'true' or 'false':"
+)
 
-Claim: {claim}
-
-Evidence:
+GRAPH_CHECK_VERIFY_WITH_EVIDENCE = """Based on this evidence:
 {evidence}
 
-Based only on the evidence provided above, determine if the evidence:
-- Supports the claim (the evidence confirms the claim is true)
-- Refutes the claim (the evidence contradicts the claim or shows it is false)
+Is this claim true or false? Claim: {claim}
+Answer only 'true' or 'false':"""
 
-Provide your answer as a single word: true or false
-"""
-
-BINARY_VERIFY_TRIPLE_WITH_CONTEXT_USER = """
-Given a claim and supporting evidence, determine whether the evidence supports or refutes the claim.
-
-Claim: {claim}
-
-Gold Evidence (for reference):
+# Optional gold context (not in the original tracer; same yes/no question over retrieved text)
+GRAPH_CHECK_VERIFY_WITH_GOLD_AND_RETRIEVED = """Reference (gold, optional):
 {gold_evidence}
 
-Retrieved Evidence:
+Based on this evidence:
 {retrieved_evidence}
 
-Based on the retrieved evidence, determine if it:
-- Supports the claim (the evidence confirms the claim is true)
-- Refutes the claim (the evidence contradicts the claim or shows it is false)
+Is this claim true or false? Claim: {claim}
+Answer only 'true' or 'false':"""
 
-Provide your answer as a single word: true or false
-"""
+# Backwards-compatible names for imports
+BINARY_VERIFY_TRIPLE_USER = GRAPH_CHECK_VERIFY_WITH_EVIDENCE
+BINARY_VERIFY_TRIPLE_WITH_CONTEXT_USER = GRAPH_CHECK_VERIFY_WITH_GOLD_AND_RETRIEVED

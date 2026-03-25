@@ -8,6 +8,10 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Local RNG for rule_list shuffle only — avoids drift when other imports (e.g. numpy,
+# llama_index) consume the global random module before get_valid_paths runs.
+_PATH_SHUFFLE_RNG = random.Random(26)
+
 
 class Triplet:
     def __init__(
@@ -109,7 +113,7 @@ class Graph:
 
     def get_adjacent_la_ent_pairs(
             self
-    ) -> list[(str, str)]:
+    ) -> list[tuple[str, str]]:
 
         adjacency_matrix = np.zeros((self.num_la_ent, self.num_la_ent), dtype=int)
 
@@ -133,9 +137,9 @@ class Graph:
 
     def backtrack(
             self,
-            rule: list[(str, str)],
+            rule: list[tuple[str, str]],
             path: list[str],
-            used_ent: list[str]
+            used_ent: set[str],
     ) -> Optional[list[str]]:
 
         if len(path) == self.num_la_ent:
@@ -190,9 +194,9 @@ class Graph:
                     rule.append((left_ent, right_ent))
             rule_list.append(rule)
 
-        # Shuffle rules if there are more than path_limit to introduce randomness
+        # Shuffle rules if there are more than path_limit (seed fixed via local RNG)
         if len(rule_list) > path_limit:
-            random.shuffle(rule_list)
+            _PATH_SHUFFLE_RNG.shuffle(rule_list)
 
         valid_paths = []
 

@@ -8,29 +8,43 @@ This script runs the full GraphCheck flow for ExFever dataset:
 4. Verification - verify each triple against evidence
 
 Run with:
-    cd /home/anhm/code/paper/src/fact-check && uv run python benchmark_exfever_graphcheck.py
+    cd /path/to/fact-check && uv run python benchmark_exfever_graphcheck.py
+
+Requires ``OPENAI_API_KEY`` and a Milvus collection populated via
+``scripts/graph_check/build_exfever_index.py``. Configure ``MILVUS_URI``,
+``MILVUS_TOKEN``, and optionally ``OPENAI_MODEL`` in ``.env`` (see ``.env.example``).
 """
-import os
+from __future__ import annotations
+
+import argparse
 import asyncio
 import json
-from typing import List
-from dotenv import load_dotenv
-from tqdm import tqdm
-import pandas as pd
 import logging
+import os
 import time
+from typing import List
 
-from llama_index.llms.openai import OpenAI
+import pandas as pd
+from dotenv import load_dotenv
+from llama_index.core.llms import LLM
+from tqdm.asyncio import tqdm as tqdm_async
 
-from src.modules.datasets.exfever import ExFever
-from src.modules.schema.graph_check.graph import Graph
+from src.impls.events.graph_check.construct_graph import ConstructGraphStartEvent
+from src.impls.events.graph_check.infilling import InfillingStartEvent
+from src.impls.events.graph_check.verification import VerificationStartEvent
 from src.impls.workflows.graph_check.construct_graph import GraphConstructWorkflow
 from src.impls.workflows.graph_check.infilling import InfillingWorkflow
+from src.impls.workflows.graph_check.trace_sink import GraphCheckTraceSink, NullGraphCheckTrace
 from src.impls.workflows.graph_check.verification import VerificationWorkflow
-from src.impls.events.graph_check.construct_graph import ConstructGraphStartEvent
-from src.impls.events.graph_check.infilling import InfillingStartEvent, InfillingLoopInitialize, InfillingStopEvent
-from src.impls.events.graph_check.verification import VerificationStartEvent
+from src.modules.datasets.exfever import ExFever
 from src.modules.evaluator import evaluate_file
+from src.utils.graphcheck_exfever import (
+    DEFAULT_MAX_CONCURRENT,
+    DEFAULT_PATH_LIMIT,
+    DEFAULT_SIMILARITY_TOP_K,
+    milvus_retriever_for_graphcheck,
+    openai_llm_for_graphcheck,
+)
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -38,25 +52,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Set verbose loggers to DEBUG level
-logging.getLogger("llama_index").setLevel(logging.DEBUG)
+logging.getLogger("llama_index").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
 
-load_dotenv('.env')
-
+load_dotenv(".env")
 
 EXFEVER_DATA_PATH = "datas/ex-fever/dev.csv"
 EXFEVER_DB_PATHS = [
     "datas/ex-fever/wiki_db.db",
-    "datas/ex-fever/wiki_wo_links.db"
+    "datas/ex-fever/wiki_wo_links.db",
 ]
 OUTPUT_FILE = "result/exfever-graphcheck.csv"
-PATH_LIMIT = 5
-SIMILARITY_TOP_K = 10
-
-# Rate limiting: maximum concurrent API calls
-MAX_CONCURRENT_REQUESTS = 10
 
 
 def normalize_prediction(prediction: str) -> str:
@@ -64,103 +71,124 @@ def normalize_prediction(prediction: str) -> str:
     prediction_mapping = {
         "SUPPORTED": "SUPPORT",
         "NOT_SUPPORTED": "REFUTE",
-        "NOT_ENOUGH_INFORMATION": "NEI"
+        "NOT_ENOUGH_INFORMATION": "NEI",
     }
     return prediction_mapping.get(prediction, prediction)
 
 
-def serialize_verification_results(verification_results):
+def serialize_verification_results(verification_results: list) -> str:
     """Serialize verification results for CSV storage."""
     if not verification_results:
         return "[]"
-    
-    # Create a simplified version for CSV
+
     simplified_results = []
     for result in verification_results:
-        simplified_result = {
-            "triple": result.get("triple", ""),
-            "prediction": result.get("prediction", ""),
-            "evidence_length": len(result.get("retrieved_evidence", ""))
-        }
-        simplified_results.append(simplified_result)
-    
+        simplified_results.append(
+            {
+                "triple": result.get("triple", ""),
+                "prediction": result.get("prediction", ""),
+                "evidence_length": len(result.get("retrieved_evidence", "")),
+            }
+        )
+
     return json.dumps(simplified_results)
 
 
-def extract_graph_info(graph_obj):
+def extract_graph_info(graph_obj) -> dict:
     """Extract key information from graph object for CSV storage."""
     if not graph_obj:
         return {}
-    
+
     return {
-        "num_latent_entities": getattr(graph_obj, 'num_la_ent', 0),
-        "num_triples": len(getattr(graph_obj, 'total_triples', [])),
-        "has_latent_entities": getattr(graph_obj, 'num_la_ent', 0) > 0
+        "num_latent_entities": getattr(graph_obj, "num_la_ent", 0),
+        "num_triples": len(getattr(graph_obj, "total_triples", [])),
+        "has_latent_entities": getattr(graph_obj, "num_la_ent", 0) > 0,
     }
 
 
 async def run_graphcheck_for_sample(
-    llm: OpenAI,
+    llm: LLM,
     claim: str,
     retriever,
-    path_limit: int = 5,
-    semaphore: asyncio.Semaphore | None = None
+    path_limit: int = DEFAULT_PATH_LIMIT,
+    semaphore: asyncio.Semaphore | None = None,
+    graph_trace: GraphCheckTraceSink | None = None,
 ) -> dict:
     """Run full GraphCheck flow for a single claim."""
+    trace = graph_trace or NullGraphCheckTrace()
     start_time = time.time()
-    total_llm_calls = 0
+
+    async def _once() -> dict:
+        return await _run_graphcheck_for_sample_impl(
+            llm, claim, retriever, path_limit, start_time, trace
+        )
 
     if semaphore:
         async with semaphore:
-            return await _run_graphcheck_for_sample_impl(
-                llm, claim, retriever, path_limit, start_time, total_llm_calls
-            )
-    else:
-        return await _run_graphcheck_for_sample_impl(
-            llm, claim, retriever, path_limit, start_time, total_llm_calls
-        )
+            return await _once()
+    return await _once()
 
 
 async def _run_graphcheck_for_sample_impl(
-    llm: OpenAI,
+    llm: LLM,
     claim: str,
     retriever,
     path_limit: int,
     start_time: float,
-    total_llm_calls: int
+    graph_trace: GraphCheckTraceSink,
 ) -> dict:
     """Implementation of GraphCheck flow for a single claim."""
+    total_llm_calls = 0
     try:
-        logger.info(f"Processing claim: {claim[:80]}...")
+        logger.info("Processing claim: %s...", claim[:80])
 
-        # Graph Construction
         construct_start = time.time()
-        construct_wf = GraphConstructWorkflow(llm=llm)
+        construct_wf = GraphConstructWorkflow(llm=llm, trace=graph_trace)
         graph_result = await construct_wf.run(
             start_event=ConstructGraphStartEvent(claim=claim)
         )
         construct_time = time.time() - construct_start
         total_llm_calls += 1
 
-        graph_obj = graph_result.graph if hasattr(graph_result, 'graph') else graph_result
+        graph_obj = graph_result.graph if hasattr(graph_result, "graph") else graph_result
         graph_info = extract_graph_info(graph_obj)
-        logger.debug(f"Graph constructed with {graph_obj.num_la_ent} latent entities, {len(graph_obj.total_triples)} triples")
+        logger.debug(
+            "Graph constructed with %s latent entities, %s triples",
+            graph_obj.num_la_ent,
+            len(graph_obj.total_triples),
+        )
+
+        paths_preview: list[list[str]] = []
+        if graph_obj.num_la_ent > 0:
+            paths_preview = graph_obj.get_valid_paths(path_limit)
+        graph_trace.graph_latent_and_paths(
+            graph_obj.num_la_ent,
+            list(graph_obj.la_ent_list),
+            path_limit,
+            paths_preview,
+        )
 
         if graph_obj.num_la_ent == 0:
             logger.debug("No latent entities, skipping infilling")
             verification_wf = VerificationWorkflow(
                 llm=llm,
                 retriever=retriever,
-                dataset_type="exfever"
+                dataset_type="exfever",
+                trace=graph_trace,
             )
             result = await verification_wf.run(
-                start_event=VerificationStartEvent(graph=graph_obj)
+                start_event=VerificationStartEvent(graph=graph_obj, path_index=0)
             )
             total_llm_calls += len(result.verification_results)
             normalized_pred = normalize_prediction(result.prediction)
             elapsed = time.time() - start_time
-            logger.info(f"Result: {normalized_pred} | Triples: {len(graph_obj.total_triples)} | "
-                       f"LLM calls: {total_llm_calls} | Time: {elapsed:.1f}s")
+            logger.info(
+                "Result: %s | Triples: %s | LLM calls: %s | Time: %.1fs",
+                normalized_pred,
+                len(graph_obj.total_triples),
+                total_llm_calls,
+                elapsed,
+            )
             return {
                 "prediction": normalized_pred,
                 "verification_results": result.verification_results,
@@ -169,59 +197,96 @@ async def _run_graphcheck_for_sample_impl(
                 "total_llm_calls": total_llm_calls,
                 "elapsed_time": elapsed,
                 "paths_tried": 0,
-                "successful_path_index": -1  # No path tried since no latent entities
+                "successful_path_index": -1,
             }
 
-        # Path Generation
-        paths = graph_obj.get_valid_paths(path_limit)
-        logger.debug(f"Generated {len(paths)} valid paths")
+        paths = paths_preview
+        logger.debug("[graphcheck] %s path(s) generated", len(paths))
 
         if not paths:
-            paths = [[]]
+            normalized_pred = normalize_prediction("NOT_SUPPORTED")
+            elapsed = time.time() - start_time
+            logger.info(
+                "Result: %s | No valid paths (num_la_ent=%s) | LLM calls: %s | Time: %.1fs",
+                normalized_pred,
+                graph_obj.num_la_ent,
+                total_llm_calls,
+                elapsed,
+            )
+            return {
+                "prediction": normalized_pred,
+                "verification_results": [],
+                "graph_info": graph_info,
+                "construction_time": construct_time,
+                "total_llm_calls": total_llm_calls,
+                "elapsed_time": elapsed,
+                "paths_tried": 0,
+                "successful_path_index": -1,
+            }
 
-        # Try each path
         for path_idx, path in enumerate(paths):
-            logger.debug(f"Trying path {path_idx + 1}/{len(paths)}: {path}")
+            logger.debug(
+                "[graphcheck] --- path %s/%s: %s ---",
+                path_idx + 1,
+                len(paths),
+                path,
+            )
+            graph_trace.path_only(path_idx, path)
 
-            # Infilling
             infilling_start = time.time()
             infilling_wf = InfillingWorkflow(
                 llm=llm,
                 retriever=retriever,
-                dataset_type="exfever"
+                dataset_type="exfever",
+                trace=graph_trace,
             )
 
             infilling_result = await infilling_wf.run(
-                start_event=InfillingStartEvent(claim=claim, path=path, graph=graph_obj)
+                start_event=InfillingStartEvent(
+                    claim=claim, path=path, graph=graph_obj, path_index=path_idx
+                )
             )
             infilling_time = time.time() - infilling_start
             total_llm_calls += len(path)
 
             infilled_graph = infilling_result.graph
 
-            # Verification
             verification_start = time.time()
             verification_wf = VerificationWorkflow(
                 llm=llm,
                 retriever=retriever,
-                dataset_type="exfever"
+                dataset_type="exfever",
+                trace=graph_trace,
             )
 
             result = await verification_wf.run(
-                start_event=VerificationStartEvent(graph=infilled_graph)
+                start_event=VerificationStartEvent(graph=infilled_graph, path_index=path_idx)
             )
             verification_time = time.time() - verification_start
             total_llm_calls += len(result.verification_results)
 
-            logger.debug(f"Infilling: {infilling_time:.1f}s | Verification: {verification_time:.1f}s | "
-                        f"Triples verified: {len(result.verification_results)}")
+            logger.debug(
+                "[graphcheck] path[%s] prediction=%s  infill=%.2fs verify=%.2fs triples_checked=%s",
+                path_idx,
+                result.prediction,
+                infilling_time,
+                verification_time,
+                len(result.verification_results),
+            )
 
             if result.prediction == "SUPPORTED":
                 normalized_pred = normalize_prediction(result.prediction)
+                graph_trace.path_prediction(path_idx, result.prediction)
                 elapsed = time.time() - start_time
-                logger.info(f"Result: {normalized_pred} | Paths tried: {path_idx + 1}/{len(paths)} | "
-                           f"Triples: {len(infilled_graph.total_triples)} | LLM calls: {total_llm_calls} | "
-                           f"Time: {elapsed:.1f}s")
+                logger.info(
+                    "Result: %s | Paths tried: %s/%s | Triples: %s | LLM calls: %s | Time: %.1fs",
+                    normalized_pred,
+                    path_idx + 1,
+                    len(paths),
+                    len(infilled_graph.total_triples),
+                    total_llm_calls,
+                    elapsed,
+                )
                 return {
                     "prediction": normalized_pred,
                     "verification_results": result.verification_results,
@@ -233,33 +298,43 @@ async def _run_graphcheck_for_sample_impl(
                     "elapsed_time": elapsed,
                     "paths_tried": path_idx + 1,
                     "successful_path_index": path_idx,
-                    "path_taken": path
+                    "path_taken": path,
                 }
 
-        # All paths failed
         normalized_pred = normalize_prediction("NOT_SUPPORTED")
         elapsed = time.time() - start_time
-        logger.info(f"Result: {normalized_pred} | All {len(paths)} paths failed | "
-                   f"Triples: {len(graph_obj.total_triples)} | LLM calls: {total_llm_calls} | "
-                   f"Time: {elapsed:.1f}s")
+        logger.info(
+            "Result: %s | All %s paths failed | Triples: %s | LLM calls: %s | Time: %.1fs",
+            normalized_pred,
+            len(paths),
+            len(graph_obj.total_triples),
+            total_llm_calls,
+            elapsed,
+        )
         return {
             "prediction": normalized_pred,
-            "verification_results": [],  # No successful verification results
+            "verification_results": [],
             "graph_info": graph_info,
             "construction_time": construct_time,
             "total_llm_calls": total_llm_calls,
             "elapsed_time": elapsed,
             "paths_tried": len(paths),
-            "successful_path_index": -1  # No successful path
+            "successful_path_index": -1,
         }
 
     except Exception as e:
         elapsed = time.time() - start_time
-        logger.error(f"Error processing claim '{claim[:50]}...': {e} | Time: {elapsed:.1f}s", exc_info=True)
+        logger.error(
+            "Error processing claim '%s...': %s | Time: %.1fs",
+            claim[:50],
+            e,
+            elapsed,
+            exc_info=True,
+        )
         return {
             "prediction": "REFUTE",
             "error": str(e),
-            "elapsed_time": elapsed
+            "elapsed_time": elapsed,
         }
 
 
@@ -267,12 +342,12 @@ async def benchmark(
     data_path: str,
     db_path: str | List[str],
     output_file: str,
-    model_name: str = "gpt-4.1-mini",
-    path_limit: int = 5,
-    similarity_top_k: int = 10,
+    model_name: str | None = None,
+    path_limit: int = DEFAULT_PATH_LIMIT,
+    similarity_top_k: int = DEFAULT_SIMILARITY_TOP_K,
     max_samples: int | None = None,
-    max_concurrent: int = MAX_CONCURRENT_REQUESTS,
-):
+    max_concurrent: int = DEFAULT_MAX_CONCURRENT,
+) -> str:
     """
     Run GraphCheck benchmark on ExFever dataset with parallel processing.
 
@@ -287,38 +362,28 @@ async def benchmark(
         max_samples: Maximum number of samples to process (None for all)
         max_concurrent: Maximum number of concurrent API requests
     """
+    _ = db_path  # CLI compatibility; retrieval uses Milvus
 
-    logger.info(f"Loading dataset from {data_path}...")
+    logger.info("Loading dataset from %s...", data_path)
     dataset = ExFever.from_csv(data_path)
 
-    if max_samples:
-        dataset_size = min(len(dataset), max_samples)
-    else:
-        dataset_size = len(dataset)
+    dataset_size = len(dataset) if max_samples is None else min(len(dataset), max_samples)
 
-    logger.info(f"Loaded {len(dataset)} samples, processing {dataset_size} with max_concurrent={max_concurrent}...")
-
-    # Configure LLM with optimized settings
-    llm = OpenAI(
-        model=model_name,
-        max_retries=3,
-        timeout=120.0,
-        reuse_client=False  # Better for high-volume async calls
+    logger.info(
+        "Loaded %s samples, processing %s with max_concurrent=%s...",
+        len(dataset),
+        dataset_size,
+        max_concurrent,
     )
 
-    # Build Milvus-backed retriever once and reuse across all samples
+    llm = openai_llm_for_graphcheck(model_name)
+
     logger.info("Connecting to Milvus-backed ExFever retriever...")
-    from src.modules.retrievers.exfever import build_exfever_milvus_retriever
-
-    retriever = build_exfever_milvus_retriever(
-        similarity_top_k=similarity_top_k,
-    )
+    retriever = milvus_retriever_for_graphcheck(similarity_top_k=similarity_top_k)
     logger.info("Retriever ready")
 
-    # Create semaphore for rate limiting
     semaphore = asyncio.Semaphore(max_concurrent)
 
-    # Process samples in parallel
     async def process_sample(i: int) -> dict:
         sample = dataset[i]
         claim = sample["claim"]
@@ -330,19 +395,17 @@ async def benchmark(
             claim=claim,
             retriever=retriever,
             path_limit=path_limit,
-            semaphore=semaphore
+            semaphore=semaphore,
         )
 
         prediction = result.get("prediction", "NOT_SUPPORTED")
-        
-        # Create detailed result dictionary for CSV
-        detailed_result = {
+
+        return {
             "claim": claim,
             "explanation": explanation,
             "label": label,
             "pred": prediction,
             "is_correct": prediction == label,
-            # Additional GraphCheck flow information
             "graph_num_latent_entities": result.get("graph_info", {}).get("num_latent_entities", 0),
             "graph_num_triples": result.get("graph_info", {}).get("num_triples", 0),
             "construction_time": result.get("construction_time", 0),
@@ -354,62 +417,79 @@ async def benchmark(
             "successful_path_index": result.get("successful_path_index", -1),
             "verification_results": serialize_verification_results(result.get("verification_results", [])),
             "path_taken": json.dumps(result.get("path_taken", [])) if result.get("path_taken") else "[]",
-            "error": result.get("error", "")
+            "error": result.get("error", ""),
         }
 
-        return detailed_result
-
-    # Run all samples in parallel with semaphore limiting concurrency
-    start_time = time.time()
-    results = await asyncio.gather(
-        *[process_sample(i) for i in range(dataset_size)]
+    bench_start = time.time()
+    results = await tqdm_async.gather(
+        *[process_sample(i) for i in range(dataset_size)],
+        desc="ExFever GraphCheck",
     )
-    total_time = time.time() - start_time
+    total_time = time.time() - bench_start
 
-    logger.info(f"Processed {dataset_size} samples in {total_time:.1f}s ({dataset_size/total_time:.2f} samples/s)")
+    logger.info(
+        "Processed %s samples in %.1fs (%.2f samples/s)",
+        dataset_size,
+        total_time,
+        dataset_size / total_time if total_time > 0 else 0,
+    )
 
     out_df = pd.DataFrame(results)
 
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    out_dir = os.path.dirname(output_file)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
     out_df.to_csv(output_file, index=False)
-    logger.info(f"Results saved to {output_file}")
+    logger.info("Results saved to %s", output_file)
 
     return output_file
 
 
-if __name__ == '__main__':
-    import argparse
-
+def main() -> None:
     parser = argparse.ArgumentParser(description="Run GraphCheck on ExFever dataset")
-    parser.add_argument("--data_path", type=str, default=EXFEVER_DATA_PATH,
-                        help="Path to ExFever CSV file")
-    parser.add_argument("--db_path", type=str, nargs='+', default=EXFEVER_DB_PATHS,
-                        help="Path(s) to ExFever wiki database(s). Can specify multiple to merge.")
-    parser.add_argument("--output", type=str, default=OUTPUT_FILE,
-                        help="Output CSV file")
-    parser.add_argument("--model", type=str, default="gpt-4.1-mini",
-                        help="OpenAI model to use")
-    parser.add_argument("--path_limit", type=int, default=PATH_LIMIT,
-                        help="Maximum number of paths to try")
-    parser.add_argument("--top_k", type=int, default=SIMILARITY_TOP_K,
-                        help="Number of documents to retrieve")
-    parser.add_argument("--max_samples", type=int, default=None,
-                        help="Maximum number of samples to process")
-    parser.add_argument("--max_concurrent", type=int, default=MAX_CONCURRENT_REQUESTS,
-                        help="Maximum number of concurrent API requests (rate limiting)")
+    parser.add_argument("--data_path", type=str, default=EXFEVER_DATA_PATH, help="Path to ExFever CSV file")
+    parser.add_argument(
+        "--db_path",
+        type=str,
+        nargs="+",
+        default=EXFEVER_DB_PATHS,
+        help="Path(s) to ExFever wiki database(s). Ignored; Milvus is used.",
+    )
+    parser.add_argument("--output", type=str, default=OUTPUT_FILE, help="Output CSV file")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=os.environ.get("OPENAI_MODEL", "gpt-4.1-mini"),
+        help="OpenAI model (default: OPENAI_MODEL env or gpt-4.1-mini)",
+    )
+    parser.add_argument("--path_limit", type=int, default=DEFAULT_PATH_LIMIT, help="Maximum number of paths to try")
+    parser.add_argument("--top_k", type=int, default=DEFAULT_SIMILARITY_TOP_K, help="Number of documents to retrieve")
+    parser.add_argument("--max_samples", type=int, default=None, help="Maximum number of samples to process")
+    parser.add_argument(
+        "--max_concurrent",
+        type=int,
+        default=DEFAULT_MAX_CONCURRENT,
+        help="Maximum number of concurrent API requests (rate limiting)",
+    )
 
     args = parser.parse_args()
 
-    output_file = asyncio.run(benchmark(
-        data_path=args.data_path,
-        db_path=args.db_path,
-        output_file=args.output,
-        model_name=args.model,
-        path_limit=args.path_limit,
-        similarity_top_k=args.top_k,
-        max_samples=args.max_samples,
-        max_concurrent=args.max_concurrent,
-    ))
+    output_file = asyncio.run(
+        benchmark(
+            data_path=args.data_path,
+            db_path=args.db_path,
+            output_file=args.output,
+            model_name=args.model,
+            path_limit=args.path_limit,
+            similarity_top_k=args.top_k,
+            max_samples=args.max_samples,
+            max_concurrent=args.max_concurrent,
+        )
+    )
 
     logger.info("Running evaluation...")
     evaluate_file(output_file)
+
+
+if __name__ == "__main__":
+    main()
