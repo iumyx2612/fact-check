@@ -57,6 +57,8 @@ class DocDB(object):
 
     def get_doc_text(self, doc_id):
         """Fetch the raw text of the doc for 'doc_id'."""
+        doc_id = normalize(doc_id)
+
         cursor = self.connection.cursor()
         cursor.execute(
             "SELECT text FROM documents WHERE id = ?",
