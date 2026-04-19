@@ -1,0 +1,114 @@
+KNOWN_ENTITY_EXTRACTION_SYSTEM = """Read the claim carefully and extract all the KNOWN entities in the claim
+KNOWN entities are entities that has explicit naming
+Please only rely on the claim to extract entity, do NOT use internal knowledge or things that are not explicitly mention in the claim
+# Response format
+Return a numbered list of KNOWN entities.
+# Example
+Claim: Albert Einstein was born in 1879 is a German and won the 1921 Nobel Prize in Physics
+Output:
+1. Albert Einstein
+2. 1879
+3. German
+4. 1921 Nobel Prize in Physics
+"""
+
+KNOWN_ENTITY_EXTRACTION_USER = "Claim: {claim}"
+
+KNOWN_ENTITY_RANKING_SYSTEM = """You are provided with a claim and extracted KNOWN entities
+Your job is to rank each entity, an entity should be higher rank if it's connected to many UNKNOWN entities
+# Response Format
+```
+1. [ENT1] - its connection to UNKNOWN entities 
+2. [ENT2] - its connection to UNKNOWN entities
+# Final Ranking
+A numbered list of KNOWN entities ranked
+```
+"""
+
+KNOWN_ENTITY_RANKING_USER = "Claim: {claim}\nEntities:\n{entities}"
+
+ENTITY_RELATION_EXTRACTION_SYSTEM = """You are provided with a claim and an entity
+Your job is to extract 1-hop relation for that entity
+Please only rely on the claim to extract entity, do NOT use internal knowledge or things that are not explicitly mention in the claim
+# Rule for Relation extraction
+- Relation MUST NOT contain a NOUN
+- ONLY extract 1-hop relation
+- The source entity and target entity must be NOUN
+# Response Format
+[Ent] -> [Relation] -> [Ent]
+# Example 1
+Claim: There was a physicist born in Germany, Theory of Relativity and Quantum theory was developed by him, who received the 1921 Nobel Prize in Physics
+Entity: Germany
+Relation:
+Physicist -> born in -> Germany
+# Example 2
+Claim: There was a physicist born in Germany, Theory of Relativity and Quantum Theory was developed by him, who received the 1921 Nobel Prize in Physics
+Entity: Theory of Relativity
+Relation:
+Theory of Relativity -> developed by -> Physicist
+# Example 3
+Claim: In Germany had the owner of 1921 Nobel Prize in Physics developed Theory of Relativity
+Entity: 1921 Nobel Prize in Physics
+Relation:
+A person -> received -> 1921 Nobel Prize in Physics
+"""
+
+ENTITY_RELATION_EXTRACTION_USER = "Claim: {claim}\nEntity: {entity}"
+
+ENTITY_GLEANING_SYSTEM = """You are provided with 3 inputs:
+- A claim
+- List of entities
+- List of existing triplets
+Your job is to extract ALL 1-hop relation for list of provided entities that is DIFFERENT from existing triplets
+# Rule for Relation extraction
+- Relation MUST NOT contain a NOUN
+- ONLY extract 1-hop relation
+- The source entity and target entity must be NOUN
+# Response Format
+[Ent] -> [Relation] -> [Ent]
+# Example 1
+Claim: The physicist, who developed Theory of Relativity, he was awarded with 1921 Nobel Prize and was born in Germany
+Entities: 
+1. Person
+2. Physicist
+Existing Triplets:
+Physicist -> developed -> Theory of Relativity
+Person -> awarded -> 1921 Nobel Prize
+Output:
+Physicist -> is -> Person_A
+Person_A -> born in -> Germany
+# Example 2
+Claim: An inventor, who developed light bulb, is also a businessman in America where Phonograph is developed
+Entities:
+1. Inventor
+2. America
+Existing Triplets:
+Inventor -> developed -> light bulb
+Phonograph -> developed in -> America
+Output:
+Inventor -> is -> businessman
+America -> has -> businessman
+"""
+
+ENTITY_GLEANING_USER = "Claim: {claim}\nEntities:\n{entities}\nTriplets:\n{triplets}"
+
+MERGE_ENTITY_SYSTEM = """You are given a claim and list of knowledge graph triplets
+Your task is to merge, normalize and connect these triplets into a coherent knowledge graph that represent the claim
+# Instruction
+1. Understand the claim
+- Identify the main entity (or entities) the claim is about
+- Determine the relationships described in the claim
+2. Normalize entities
+- Merge entities that refer to the same concept
+- Replace generic entities with specific entities from the claim when appropriate
+3. Output the final Graph
+- Provide a cleaned list of triplets in the format: `source -> relation -> target`
+# Output format
+```
+<cleaned triplet 1>
+<cleaned triplet 2>
+<cleaned triplet 3>
+```
+"""
+
+MERGE_ENTITY_USER = "Claim: {claim}\nTriplets:\n{triplets}"
