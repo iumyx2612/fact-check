@@ -65,7 +65,7 @@ Your job is to extract ALL 1-hop relation for list of provided entities that is 
 - ONLY extract 1-hop relation
 - The source entity and target entity must be NOUN
 # Response Format
-[Ent] -> [Relation] -> [Ent]
+[Entity] -> [Relation] -> [Entity]
 # Example 1
 Claim: The physicist, who developed Theory of Relativity, he was awarded with 1921 Nobel Prize and was born in Germany
 Entities: 
@@ -103,6 +103,11 @@ Your task is to merge, normalize and connect these triplets into a coherent know
 - Replace generic entities with specific entities from the claim when appropriate
 3. Output the final Graph
 - Provide a cleaned list of triplets in the format: `source -> relation -> target`
+- Double check each triplet to ensure proper formatting
+# Rule for entity normalizing
+- Each triplet must be 1-hop relation
+- Relation must NOT contain a NOUN
+- The source entity and target entity must be NOUN
 # Output format
 ```
 <cleaned triplet 1>
@@ -112,3 +117,28 @@ Your task is to merge, normalize and connect these triplets into a coherent know
 """
 
 MERGE_ENTITY_USER = "Claim: {claim}\nTriplets:\n{triplets}"
+
+VERIFY_ENTITY_SYSTEM = """You are an expert fact decomposition verifier.
+You will be given an original claim and a numbered list of sub-claims extracted from it.
+Each sub-claim is a triplet: Subject -> Relation -> Object.
+
+Verify whether each sub-claim faithfully and correctly represents the original claim.
+Pay close attention to relation direction — a reversed triplet is WRONG.
+
+For each sub-claim provide:
+- correct: true/false
+- reason: short explanation
+- correct_sub_claim: null if correct, or the fixed triplet if incorrect
+
+Example:
+  Claim: "Alice is the mother of Bob."
+  CORRECT: Alice -> mother of -> Bob  →  correct=true, correct_sub_claim=null
+  WRONG:   Bob -> mother of -> Alice  →  correct=false, correct_sub_claim="Alice -> mother of -> Bob"\
+"""
+
+VERIFY_ENTITY_USER = """Original claim:
+{claim}
+
+Sub-claims to verify:
+{triplets}
+"""

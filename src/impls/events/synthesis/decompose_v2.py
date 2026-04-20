@@ -21,5 +21,9 @@ class DecomposeMergeGraph(Event):
     all_triplets: list[Triplet]
 
 
+class DecomposeVerifyGraph(Event):
+    all_triplets: list[Triplet]
+
+
 class DecomposeStopEvent(StopEvent):
     sub_claims: list[Triplet]

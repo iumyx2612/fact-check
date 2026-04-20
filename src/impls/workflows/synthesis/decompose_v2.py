@@ -15,9 +15,11 @@ from ...events.synthesis.decompose_v2 import (
     DecomposeExtractRelation,
     DecomposeGleaningEntity,
     DecomposeMergeGraph,
+    DecomposeVerifyGraph,
     DecomposeStopEvent
 )
 from .context import SynthesisContext
+from src.modules.schema.synthesis.decompose_v2 import DecompositionVerdict, SubClaimVerdict
 from src.modules.prompts.synthesis.decompose_v2 import (
     KNOWN_ENTITY_EXTRACTION_SYSTEM,
     KNOWN_ENTITY_EXTRACTION_USER,
@@ -28,7 +30,9 @@ from src.modules.prompts.synthesis.decompose_v2 import (
     ENTITY_GLEANING_SYSTEM,
     ENTITY_GLEANING_USER,
     MERGE_ENTITY_SYSTEM,
-    MERGE_ENTITY_USER
+    MERGE_ENTITY_USER,
+    VERIFY_ENTITY_SYSTEM,
+    VERIFY_ENTITY_USER
 )
 
 
@@ -36,6 +40,7 @@ class DecomposeWorkflow(Workflow):
     def __init__(self, llm: LLM, **kwargs):
         super().__init__(**kwargs)
         self.llm = llm
+        self.verify_llm = llm.as_structured_llm(DecompositionVerdict)
 
     @step
     async def initialize(
@@ -212,7 +217,7 @@ class DecomposeWorkflow(Workflow):
     @step
     async def merge_graph(
             self, ctx: Context[SynthesisContext], ev: DecomposeMergeGraph
-    ) -> DecomposeStopEvent:
+    ) -> DecomposeVerifyGraph:
         claim = await ctx.store.get("claim")
         triplets = ev.all_triplets
         triplet_string = []
@@ -254,4 +259,52 @@ class DecomposeWorkflow(Workflow):
                     target_entity
                 ))
 
-        return DecomposeStopEvent(sub_claims=final_triplets)
+        return DecomposeVerifyGraph(all_triplets=final_triplets)
+
+    @step
+    async def verify_graph(
+            self, ctx: Context[SynthesisContext], ev: DecomposeVerifyGraph
+    ) -> DecomposeStopEvent:
+        claim = await ctx.store.get("claim")
+        triplets = ev.all_triplets
+        triplet_string = []
+        for i, triplet in enumerate(triplets):
+            triplet_string.append(
+                f"{i+1}. {triplet[0].id} -> {triplet[1].id} -> {triplet[2].id}"
+            )
+        triplet_string = "\n".join(triplet_string)
+
+        response = await self.verify_llm.achat([
+            ChatMessage(
+                content=VERIFY_ENTITY_SYSTEM,
+                role="system"
+            ),
+            ChatMessage(
+                content=VERIFY_ENTITY_USER.format(
+                    claim=claim,
+                    triplets=triplet_string
+                )
+            )
+        ])
+        verdicts = response.raw.verdicts
+
+        new_triplets: list[Triplet] = []
+        for i, verdict in enumerate(verdicts):
+            if verdict.correct:
+                new_triplets.append(triplets[i])
+            else:
+                if not verdict.correct_sub_claim:
+                    continue
+                new_triplet = verdict.correct_sub_claim
+                parts = [p.strip() for p in new_triplet.split("->")]
+                if len(parts) == 3:
+                    source, rel, target = parts
+                    source_entity = EntityNode(name=source)
+                    target_entity = EntityNode(name=target)
+                    new_triplets.append((
+                        source_entity,
+                        Relation(label=rel, source_id=source_entity.id, target_id=target_entity.id),
+                        target_entity
+                    ))
+
+        return DecomposeStopEvent(sub_claims=new_triplets)
