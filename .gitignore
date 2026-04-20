@@ -9,6 +9,12 @@ wheels/
 datas/
 result/
 
+# folder ignore
+tests/
+cache/
+docs/ 
+logs/
+
 # Virtual environments
 .venv
 .env
