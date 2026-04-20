@@ -13,7 +13,7 @@ def evaluate_file(
     y_true = df["label"].tolist()
     y_pred = df["pred"].tolist()
 
-    cls_report = classification_report(y_true, y_pred, labels=labels)
+    cls_report = classification_report(y_true, y_pred, labels=labels, zero_division=0)
     matrix = confusion_matrix(y_true, y_pred, labels=labels)
 
     print(cls_report)
