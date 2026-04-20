@@ -13,9 +13,11 @@ dependencies = [
     "llama-index-llms-openai-like>=0.7.0",
     "llama-index-retrievers-bm25>=0.6.5",
     "llama-index-vector-stores-milvus>=1.0.0",
+    "pdfplumber>=0.11.9",
     "psutil>=7.2.2",
     "python-dotenv>=1.2.2",
     "scikit-learn>=1.8.0",
+    "wikipedia>=1.4.0",
 ]
 
 [tool.pyright]
