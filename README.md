@@ -90,6 +90,35 @@ uv sync
 `benchmark.py` calls `load_dotenv()`. You can create a `.env` file at the repo root, e.g.:
 - `OPENAI_API_KEY=...`
 
+### Using vLLM or Self-Hosted Models
+
+The codebase supports OpenAI, vLLM, and any OpenAI-compatible API. Configure via environment variables:
+
+**For OpenAI (default):**
+```bash
+LLM_PROVIDER=openai
+OPENAI_API_KEY=your-key
+OPENAI_MODEL=gpt-4.1-mini
+```
+
+**For vLLM:**
+```bash
+LLM_PROVIDER=vllm
+LLM_API_BASE_URL=http://localhost:8000/v1
+LLM_API_KEY=not-needed-for-vllm  # or your API key
+LLM_MODEL_NAME=meta-llama/Llama-2-7b-chat-hf
+```
+
+**For Custom OpenAI-compatible API:**
+```bash
+LLM_PROVIDER=custom
+LLM_API_BASE_URL=https://your-api-endpoint.com/v1
+LLM_API_KEY=your-api-key
+LLM_MODEL_NAME=your-model-name
+```
+
+See `.env.example` for all available options.
+
 ### Run ViFactCheck benchmark + simple workflow
 ```bash
 uv run python benchmark.py

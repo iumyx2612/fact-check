@@ -1,6 +1,6 @@
 from workflows.events import StartEvent, StopEvent, Event
 
-from src.modules.schema.graph_check.graph import Graph
+from src.modules.graph_check.graph import Graph
 
 
 class ConstructGraphStartEvent(StartEvent):
