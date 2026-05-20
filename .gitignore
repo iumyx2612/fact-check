@@ -9,6 +9,11 @@ wheels/
 datas/
 result/
 
+cache/
+logs/
+docs/
+tests/
+
 # Virtual environments
 .venv
 .env
