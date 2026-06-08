@@ -33,6 +33,10 @@ def wiki_to_plain_text(text: str) -> str:
     return WIKI_LINK_PATTERN.sub(r"\1", str(text)).strip()
 
 
+def wiki_links_to_md_links(text):
+    return re.sub(r'\[\[([^|]+)\|([^]]+)]]', r'[\2](\1)', text)
+
+
 def wiki_table_to_md(text: str) -> str:
     lines = [wiki_to_plain_text(line) for line in text.strip().split("\n")]
 

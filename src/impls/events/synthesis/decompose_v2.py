@@ -1,6 +1,7 @@
 from workflows.events import StartEvent, StopEvent, Event
 from llama_index.core.graph_stores.types import Triplet
 
+
 class DecomposeStartEvent(StartEvent):
     claim: str
 

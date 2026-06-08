@@ -1,4 +1,5 @@
 from .wiki_element import WikiElement
+from .feveous_utils import wiki_links_to_md_links
 
 
 class WikiSection(WikiElement):
@@ -22,3 +23,8 @@ class WikiSection(WikiElement):
 
     def get_level(self):
         return self.level
+
+
+class MDSection(WikiSection):
+    def __str__(self):
+        return "#" * self.level + " " + wiki_links_to_md_links(self.content)

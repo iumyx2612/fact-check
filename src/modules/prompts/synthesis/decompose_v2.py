@@ -28,12 +28,15 @@ A numbered list of KNOWN entities ranked
 KNOWN_ENTITY_RANKING_USER = "Claim: {claim}\nEntities:\n{entities}"
 
 ENTITY_RELATION_EXTRACTION_SYSTEM = """You are provided with a claim and an entity
-Your job is to extract 1-hop relation for that entity
+Your job is to extract *1-hop*, *atomic* relation for that entity
 Please only rely on the claim to extract entity, do NOT use internal knowledge or things that are not explicitly mention in the claim
 # Rule for Relation extraction
-- Relation MUST NOT contain a NOUN
-- ONLY extract 1-hop relation
-- The source entity and target entity must be NOUN
+- Relation MUST be single, simple verbs or verb phrases or prepositions
+- Compound relation is NOT allowed
+- If a relation contains a noun, it MUST be split into:
+    - A structural relation (e.g. "has")
+    - A type relation (e.g "is")
+- The source entity and target entity MUST be NOUN
 # Response Format
 [Ent] -> [Relation] -> [Ent]
 # Example 1
@@ -53,17 +56,43 @@ Relation:
 A person -> received -> 1921 Nobel Prize in Physics
 """
 
+ENTITY_RELATION_EXTRACTION_SYSTEM_V2 = """You are provided with a claim and an entity
+Your task is to extract structured knowledge graph triplets for that entity
+Please only rely on the claim to extract entity, do NOT use internal knowledge or things that are not explicitly mention in the claim
+# Response Format
+[Entity] -> [Relation] -> [Entity]
+# Rule for Relation
+- Relation MUST be single, simple verbs or verb phrases or prepositions
+- Compound relation is NOT allowed
+- If a relation contains a noun, decompose it into two triplets using intermediate node:
+    - A structural relation (e.g. "has")
+    - A type relation (e.g "is")
+    - Intermediate node MUST have unique identifier
+    - Do not reuse node names for different entities.
+    - Example: A -> has -> uncle_1, uncle_1 -> is -> B
+- The source entity and target entity MUST be NOUN
+- ONLY extract *1-hop*, *atomic* relation
+# Rule for Entity
+- Be careful of Capitalization Entity, e.g. Einstein is different from einstein
+"""
+
 ENTITY_RELATION_EXTRACTION_USER = "Claim: {claim}\nEntity: {entity}"
 
 ENTITY_GLEANING_SYSTEM = """You are provided with 3 inputs:
 - A claim
 - List of entities
 - List of existing triplets
-Your job is to extract ALL 1-hop relation for list of provided entities that is DIFFERENT from existing triplets
+Your job is to extract ALL *1-hop* relation for list of provided entities that is DIFFERENT from existing triplets
 # Rule for Relation extraction
-- Relation MUST NOT contain a NOUN
-- ONLY extract 1-hop relation
-- The source entity and target entity must be NOUN
+- Relation MUST be single, simple verbs or verb phrases or prepositions
+- Compound relation is NOT allowed
+- If a relation contains a noun, decompose it into two triplets using intermediate node:
+    - A structural relation (e.g. "has")
+    - A type relation (e.g "is")
+    - Intermediate node MUST have unique identifier
+    - Do not reuse node names for different entities.
+    - Example: A -> has -> uncle_1, uncle_1 -> is -> B
+- The source entity and target entity MUST be NOUN
 # Response Format
 [Entity] -> [Relation] -> [Entity]
 # Example 1
@@ -105,8 +134,12 @@ Your task is to merge, normalize and connect these triplets into a coherent know
 - Provide a cleaned list of triplets in the format: `source -> relation -> target`
 - Double check each triplet to ensure proper formatting
 # Rule for entity normalizing
-- Each triplet must be 1-hop relation
-- Relation must NOT contain a NOUN
+- Each triplet MUST be 1-hop relation
+- Relation MUST be single, simple verbs or verb phrases or prepositions
+- Compound relation is NOT allowed
+- If a relation contains a noun, it MUST be split into:
+    - A structural relation (e.g. "has")
+    - A type relation (e.g "is")
 - The source entity and target entity must be NOUN
 # Output format
 ```

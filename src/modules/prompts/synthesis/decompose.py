@@ -19,3 +19,18 @@ Output:
 
 DECOMPOSE_CLAIM_USER = ("Claim: {claim}"
                         "Output:\n")
+
+DECOMPOSE_VERIFY_SYSTEM = """You are an expert fact decomposition verifier.
+You will be given an original claim and a single sub-claim extracted from it.
+Verify whether the extracted sub-claim faithfully and correctly represents the original claim.
+
+Please provide:
+- reason: short explanation
+- correct: true/false (true if the extracted sub-claim is from the original claim)
+- correct_sub_claim: null if correct, or the fixed sub-claim if incorrect
+Important rule: Do not use any external knowledge. Base your verdict only on the provided claim and sub-claim.
+"""
+
+DECOMPOSE_VERIFY_USER = """Original claim: {claim}
+Sub-claim to verify: {sub_claim}
+"""

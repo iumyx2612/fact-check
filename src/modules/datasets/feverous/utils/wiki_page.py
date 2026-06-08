@@ -2,10 +2,10 @@ import itertools
 import logging
 
 from .wiki_element import WikiElement
-from .wiki_list import WikiList
-from .wiki_section import WikiSection
-from .wiki_sentence import WikiSentence
-from .wiki_table import WikiTable
+from .wiki_list import WikiList, MDList
+from .wiki_section import WikiSection, MDSection
+from .wiki_sentence import WikiSentence, MDSentence
+from .wiki_table import WikiTable, MDTable
 
 
 class WikiTitle(WikiElement):
@@ -27,6 +27,11 @@ class WikiTitle(WikiElement):
 
 
 class WikiPage:
+    _table_class = WikiTable
+    _list_class = WikiList
+    _sentence_class = WikiSentence
+    _section_class = WikiSection
+
     def __init__(self, title, dict, filter=None, mode=None):
         self.error_dict = {
             "tables_empty": 0,
@@ -54,7 +59,7 @@ class WikiPage:
                     self.error_dict["tables_empty"] += 1
                     continue
                 try:
-                    tab = WikiTable(entry, dict[entry], self.title.content)
+                    tab = self._table_class(entry, dict[entry], self.title.content)
                     self.page_items[entry] = tab
                 except Exception:
                     self.error_dict["tables_formatting_errors"] += 1
@@ -68,7 +73,7 @@ class WikiPage:
                     self.error_dict["list_empty"] += 1
                     continue
                 try:
-                    tab = WikiList(entry, dict[entry], self.title.content)
+                    tab = self._list_class(entry, dict[entry], self.title.content)
                     self.page_items[entry] = tab
                 except Exception:
                     self.error_dict["list_formatting_errors"] += 1
@@ -76,10 +81,10 @@ class WikiPage:
                     # traceback.print_exc()
                     # print(title, entry)
             elif entry.startswith("sentence_"):
-                text = WikiSentence(entry, dict[entry], self.title.content)
+                text = self._sentence_class(entry, dict[entry], self.title.content)
                 self.page_items[entry] = text
             elif entry.startswith("section_"):
-                section = WikiSection(entry, dict[entry], self.title.content)
+                section = self._section_class(entry, dict[entry], self.title.content)
                 # print(str(section))
                 self.page_items[entry] = section
 
@@ -300,3 +305,10 @@ class WikiPage:
             del item
         del self.title
         del self.page_order
+
+
+class MDWikiPage(WikiPage):
+    _table_class = MDTable
+    _list_class = MDList
+    _sentence_class = MDSentence
+    _section_class = MDSection

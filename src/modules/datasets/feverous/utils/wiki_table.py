@@ -1,6 +1,8 @@
 import itertools
+import re
 
 from .wiki_element import WikiElement, process_text
+from .feveous_utils import wiki_links_to_md_links
 
 
 class WikiTable(WikiElement):
@@ -142,3 +144,47 @@ class Row:
 
     def id_repr(self):
         return " | ".join(self.cell_ids)
+
+
+class MDCell(Cell):
+    def __str__(self):
+        return wiki_links_to_md_links(self.content)
+
+
+class MDRow(Row):
+    def __init__(self, row_json, row_num, page):
+        super().__init__(row_json, row_num, page)
+        self.json = row_json
+        self.row_num = row_num
+        self.page = page
+        self.row = [MDCell(cell, row_num, i, self.page) for i, cell in enumerate(row_json)]
+        self.cell_ids = [cell.name for cell in self.row]
+        self.id = " | ".join(self.cell_ids)
+        self.cell_content = [cell.content for cell in self.row]
+        self._is_header_row = all(ele.is_header for ele in self.row)
+
+    def __str__(self):
+        return "| " + " | ".join(str(cell) for cell in self.row) + " |"
+
+
+class MDTable(WikiTable):
+    def __init__(self, name, table_json, page):
+        super().__init__(name, table_json, page)
+        self.rows = [MDRow(row, i, self.page) for i, row in enumerate(self.table)]
+        self.header_rows = [row for row in self.rows if row.is_header_row()]
+        self.cell_ids = list(itertools.chain(*[row.cell_ids for row in self.rows]))
+        self.all_cells = {}
+        for row in self.rows:
+            for cell in row.row:
+                self.all_cells[cell.name] = cell
+
+    def __str__(self):
+        lines = []
+        separator = None
+        for row in self.rows:
+            lines.append(str(row))
+            if row.is_header_row() and separator is None:
+                col_count = len(row.row)
+                separator = "| " + " | ".join("---" for _ in range(col_count)) + " |"
+                lines.append(separator)
+        return "\n".join(lines)

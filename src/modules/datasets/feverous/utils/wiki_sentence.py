@@ -1,4 +1,5 @@
 from .wiki_element import WikiElement, process_text
+from .feveous_utils import wiki_links_to_md_links
 
 
 class WikiSentence(WikiElement):
@@ -18,3 +19,8 @@ class WikiSentence(WikiElement):
 
     def get_ids(self):
         return [self.name]
+
+
+class MDSentence(WikiSentence):
+    def __str__(self):
+        return wiki_links_to_md_links(self.content)

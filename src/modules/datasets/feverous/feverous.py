@@ -1,11 +1,12 @@
 from typing import Optional
 
 from .utils.annotation_processor import AnnotationProcessor
-from .utils.wiki_page import WikiPage
+from .utils.wiki_page import WikiPage, MDWikiPage
 from .database.feverous_db import FeverousDB
-from ..base import Dataset
+from ..base import Dataset, DatasetOutput
 from .utils import normalize_feverous_label
 from .utils.feveous_utils import wiki_table_to_md, wiki_to_plain_text
+
 
 class Feverous(Dataset):
     def __init__(self,
@@ -100,3 +101,35 @@ class Feverous(Dataset):
                 "evidence": evidence,
                 "label": label
             }
+
+
+class MDFeverous(Feverous):
+    def __iter__(self):
+        for annotation in self.annotations:
+            claim = annotation.get_claim()
+            id = annotation.get_id()
+            try:
+                label = normalize_feverous_label(annotation.get_verdict())
+                evidences = annotation.get_evidence(flat=True)
+                doc_ids = [
+                    evidence.split('_')[0] for evidence in evidences
+                ]
+                doc_ids = list(set(doc_ids))
+                documents = []
+                for doc_id in doc_ids:
+                    page_json = self.wiki_db.get_doc_json(doc_id)
+                    wiki_page = MDWikiPage(doc_id, page_json)
+                    documents.append(str(wiki_page))
+
+            except:
+                label = None
+                doc_ids = None
+                documents = None
+
+            yield DatasetOutput(
+                claim=claim,
+                label=label,
+                context=documents,
+                golden_docs=doc_ids,
+                id=id
+            )

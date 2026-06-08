@@ -100,5 +100,5 @@ Robert Philip Hanssen [SEP] is [SEP] a former FBI agent
 (ENT1) [SEP] starred in [SEP] the 2005 Capitol film Chaos
 
 # Claim: 
-<<target_claim>>
+{claim}
 """

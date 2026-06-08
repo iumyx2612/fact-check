@@ -1,3 +1,5 @@
+import re
+
 from workflows import Workflow, step, Context
 from llama_index.core.llms import LLM
 from llama_index.core.prompts import ChatMessage
@@ -10,12 +12,23 @@ from ...events.synthesis.verify import (
     VerifyAggregateEvent,
     VerifyStopEvent
 )
-from src.modules.prompts.synthesis.verify import VERIFY_SYSTEM, VERIFY_USER
+from src.modules.prompts.synthesis.verify import (
+    VERIFY_SYSTEM,
+    VERIFY_USER,
+    VERIFY_REASONING_SYSTEM,
+    VERIFY_REASONING_SYSTEM_V2,
+    VERIFY_REASONING_USER
+)
+from src.modules.datasets.base import LABELS
 
 
 class VerifyWorkflow(Workflow):
-    def __init__(self, llm: LLM, **kwargs):
+    def __init__(self,
+                 llm: LLM,
+                 use_reasoning: bool = False,
+                 **kwargs):
         super().__init__(**kwargs)
+        self.use_reasoning = use_reasoning
         self.llm = llm
 
     @step
@@ -41,7 +54,7 @@ class VerifyWorkflow(Workflow):
     async def loop_init(
             self, ctx: Context[SynthesisContext], ev: VerifyLoopInit
     ) -> VerifySingleSubClaim | VerifyAggregateEvent:
-        verify_index = await ctx.store.get("sub_claim_index")
+        verify_index = await ctx.store.get("verify_ctx.verify_index")
         sub_claims = await ctx.store.get("sub_claims")
 
         if verify_index >= len(sub_claims):
@@ -56,34 +69,60 @@ class VerifyWorkflow(Workflow):
         sub_claim = ev.sub_claim
         documents = await ctx.store.get("documents")
 
-        response = await self.llm.achat([
-            ChatMessage(
-                content=VERIFY_SYSTEM,
-                role="system"
-            ),
-            ChatMessage(
-                content=VERIFY_USER.format(
-                    document="\n\n".join(documents),
-                    claim=sub_claim
+        if self.use_reasoning:
+            response = await self.llm.achat([
+                ChatMessage(
+                    content=VERIFY_REASONING_SYSTEM_V2,
+                    role="system"
                 ),
-                role="user"
-            )
-        ])
-        content = response.message.content
+                ChatMessage(
+                    content=VERIFY_REASONING_USER.format(
+                        document="\n\n".join(documents),
+                        claim=sub_claim
+                    ),
+                    role="user"
+                )
+            ])
+            content = response.message.content
+            # Regex to extract Verdict
+            match = re.search(r"verdict:\s*(true|false|not enough information)", content, re.IGNORECASE)
+            verdict_str = match.group(1).lower() if match else "not enough information"
 
-        if "True" in content:
-            label = "SUPPORT"
-        elif "False" in content:
-            label = "REFUTE"
-        elif "Not Enough Information" in content:
-            label = "NEI"
+            verdict_map = {
+                "true": LABELS[0],
+                "false": LABELS[1],
+                "not enough information": LABELS[2],
+            }
+            label = verdict_map.get(verdict_str, LABELS[2])
         else:
-            label = "NEI"
+            response = await self.llm.achat([
+                ChatMessage(
+                    content=VERIFY_SYSTEM,
+                    role="system"
+                ),
+                ChatMessage(
+                    content=VERIFY_USER.format(
+                        document="\n\n".join(documents),
+                        claim=sub_claim
+                    ),
+                    role="user"
+                )
+            ])
+            content = response.message.content
+
+            if "True" in content:
+                label = "SUPPORT"
+            elif "False" in content:
+                label = "REFUTE"
+            elif "Not Enough Information" in content:
+                label = "NEI"
+            else:
+                label = "NEI"
 
         # Update context
         async with ctx.store.edit_state() as ctx_state:
-            ctx_state.sub_claim_mapping[sub_claim] = label
-            ctx_state.sub_claim_index += 1
+            ctx_state.verify_ctx.verify_mapping[sub_claim] = label
+            ctx_state.verify_ctx.verify_index += 1
 
         # Early stopping
         if label == "REFUTE":
@@ -93,7 +132,7 @@ class VerifyWorkflow(Workflow):
 
     @step
     async def aggregate(self, ctx: Context[SynthesisContext], ev: VerifyAggregateEvent) -> VerifyStopEvent:
-        sub_claim_mapping = await ctx.store.get("sub_claim_mapping")
+        sub_claim_mapping = await ctx.store.get("verify_ctx.verify_mapping")
         for sub_claim, result in sub_claim_mapping.items():
             if result == "REFUTE":
                 return VerifyStopEvent(result="REFUTE")

@@ -26,6 +26,7 @@ from src.modules.prompts.synthesis.decompose_v2 import (
     KNOWN_ENTITY_RANKING_SYSTEM,
     KNOWN_ENTITY_RANKING_USER,
     ENTITY_RELATION_EXTRACTION_SYSTEM,
+    ENTITY_RELATION_EXTRACTION_SYSTEM_V2,
     ENTITY_RELATION_EXTRACTION_USER,
     ENTITY_GLEANING_SYSTEM,
     ENTITY_GLEANING_USER,
@@ -125,7 +126,7 @@ class DecomposeWorkflow(Workflow):
         for entity in ranked_entities:
             response = await self.llm.achat([
                 ChatMessage(
-                    content=ENTITY_RELATION_EXTRACTION_SYSTEM,
+                    content=ENTITY_RELATION_EXTRACTION_SYSTEM_V2,
                     role="system"
                 ),
                 ChatMessage(
@@ -198,18 +199,18 @@ class DecomposeWorkflow(Workflow):
         # Extract triplets from content
         content = response.message.content
         new_triplets: list[Triplet] = []
-        for line in content.strip().splitlines():
-            parts = [p.strip() for p in line.split("->")]
-            if len(parts) == 3:
-                source, rel, target = parts
-                source_entity = EntityNode(name=source)
-                target_entity = EntityNode(name=target)
-                new_triplets.append((
-                    source_entity,
-                    Relation(label=rel, source_id=source_entity.id, target_id=target_entity.id),
-                    target_entity
-                ))
-
+        if content:
+            for line in content.strip().splitlines():
+                parts = [p.strip() for p in line.split("->")]
+                if len(parts) == 3:
+                    source, rel, target = parts
+                    source_entity = EntityNode(name=source)
+                    target_entity = EntityNode(name=target)
+                    new_triplets.append((
+                        source_entity,
+                        Relation(label=rel, source_id=source_entity.id, target_id=target_entity.id),
+                        target_entity
+                    ))
         all_triplets = existing_triplets + new_triplets
 
         return DecomposeMergeGraph(all_triplets=all_triplets)
